@@ -1,8 +1,6 @@
 #include "AWGame.h"
 
-#include "Tileset.h"
-#include "SpriteAnimations.h"
-#include "SpriteAssets.h"
+#include "fxdata/fxdata.h" // addresses of the art and maps on the FX chip
 #include "MapData.h"
 #include "ShopData.h"
 
@@ -12,7 +10,6 @@
 #include "PointMath.h"
 #include "AWSounds.h"
 #include "UnitSprites.h"
-#include "PinupSprite.h"
 #include <TinyfontSprite.c> // the letter pictures of the Tinyfont library, see printChar
 
 // This method starts the actual game and is called in the Arduwars.ino file.
@@ -24,6 +21,9 @@ void AWGame::run(void){
   // to upload a new sketch even if the current one misbehaves.
   arduboy.boot();
   arduboy.flashlight();
+  // The art and maps live on the FX flash chip. It shares its wires with the
+  // screen, so the screen is only switched on while FX::display() sends a picture.
+  FX::begin(FX_DATA_PAGE);
   arduboy.setFrameRate(60);
   arduboy.audio.begin();
   soundBegin();
@@ -122,7 +122,7 @@ int8_t AWGame::showTitleMenu(char_P * const items[], uint8_t count, bool canGoBa
       if ((uint8_t)(titleDrop - 50) < 20) logoX += (titleDrop & 2) - 1;   // frames 50-69: 1 pixel left, right, left...
       titleDrop++;
     }
-    sprites.drawSelfMasked(logoX, logoY, arduwarsLogo, 0);
+    FX::drawBitmap(logoX, logoY, arduwarsLogo, 0, dbmWhite);
 
     if (menuShows) {
       // Behind the chosen item: diagonal stripes, 2 pixels wide with 4 pixel gaps,
@@ -149,10 +149,10 @@ int8_t AWGame::showTitleMenu(char_P * const items[], uint8_t count, bool canGoBa
     }
 
     // the pinup stands in front of the menu, the stripes run on behind her
-    sprites.drawOverwrite(pinupX, 2, pinup, 0);
+    FX::drawBitmap(pinupX, 2, pinup, 0, dbmNormal);
 
     // this one draws everything we have drawn to the actual screen.
-    arduboy.display();
+    FX::display();
 
     // Now this loop wraps around and keeps repeating until the user selects
     // an menu item.
@@ -180,8 +180,8 @@ AWGameState AWGame::showMainMenu(){
 }
 
 // This method displays the map selection menu to the player.
-// It returns the selected map in progmem, nullptr if cancelled.
-const unsigned char * AWGame::showMapSelection(){
+// It returns the selected map's address on the FX chip, 0 if cancelled.
+uint24_t AWGame::showMapSelection(){
   char_P* items[3] = {LOCA_mapSmall, LOCA_mapMedium, LOCA_mapBig};
 
   // select map to users choice
@@ -189,7 +189,7 @@ const unsigned char * AWGame::showMapSelection(){
     case 0: return mapData_3;
     case 1: return mapData_2;
     case 2: return mapData_1;
-    default: return nullptr;
+    default: return 0; // the map tiles sit at 0, never a map
   }
 }
 
@@ -204,10 +204,10 @@ void AWGame::startNewGame(AWGameState mode){
   player2.reset();
 
   // shop map selection
-  const unsigned char *mapData = showMapSelection();
+  uint24_t mapData = showMapSelection();
 
   // return if no map has been selected
-  if (mapData == nullptr) return;
+  if (mapData == 0) return;
 
   // the logo drops in again when the title comes back after the match
   titleDrop = 0;
@@ -327,7 +327,7 @@ void AWGame::runGame(bool againstAI){
 
     // the new view wipes in from black
     if (wipe) makeScreenTransition(true);
-    else arduboy.display();
+    else FX::display();
 
     // against the AI the turn text pops up on the map
     if (startOnMap) showDialog(LOCA_yourTurn);
@@ -585,7 +585,7 @@ void AWGame::doRoundOfPlayer(AWPlayer &currentPlayer, bool aiTurn){
         drawHudForPlayer(viewer);
 
         // Draw everything
-        arduboy.display();
+        FX::display();
 
         // no buttons while a unit walks
         if (turnState == AWTurnState::UnitWalking) continue;
@@ -958,7 +958,7 @@ void AWGame::showResults(char_P *titleText, bool againstAI){
     printNumber(x, 52, (side ? player2.money : player1.money)/10);
     printChar('K');
   }
-  arduboy.display();
+  FX::display();
 
   // B goes back to the title
   while (true) {
@@ -1039,7 +1039,7 @@ int8_t AWGame::showBox(char_P * const options[], uint8_t count, bool isDialog, u
       printAt(frame.x + 4, textY + 7*selectedIndex, LOCA_Cursor);
     }
 
-    arduboy.display();
+    FX::display();
   }
 }
 
@@ -1171,7 +1171,7 @@ UnitType AWGame::showShopForBuildingAndPlayer(MapTileType building, AWPlayer &aP
     printAt(76, 50, LOCA_Trait_speed);
     printNumber(115, 50, traits.moveDistance);
 
-    arduboy.display();
+    FX::display();
   }
 
   return UnitType::None;
@@ -1220,7 +1220,7 @@ Point AWGame::calculateCameraPosition(Point forCursorPosition){
   return camera;
 }
 
-void AWGame::loadMap(const unsigned char *newMapData){
+void AWGame::loadMap(uint24_t newMapData){
 
   static_assert(MapDataHeaderSize == MAPDATAOFFSET_Main, "map header size mismatch");
 
@@ -1228,9 +1228,12 @@ void AWGame::loadMap(const unsigned char *newMapData){
   gameBuildings.clear();
 
   // handle map meta info
+  uint8_t header[MAPDATAOFFSET_Main];
+  FX::readDataBytes(newMapData, header, MAPDATAOFFSET_Main);
+
   // get size
-  mapSize.x  = pgm_read_byte(newMapData+MAPDATAOFFSET_Size);
-  mapSize.y  = pgm_read_byte(newMapData+MAPDATAOFFSET_Size+1);
+  mapSize.x  = header[MAPDATAOFFSET_Size];
+  mapSize.y  = header[MAPDATAOFFSET_Size+1];
 
   // refuse maps larger than the fixed buffer
   if (mapSize.x > MaxMapWidth || mapSize.y > MaxMapHeight) {
@@ -1241,21 +1244,21 @@ void AWGame::loadMap(const unsigned char *newMapData){
 
   // p1 meta Data
   Point player1StartCityCoords;
-  player1StartCityCoords.x = pgm_read_byte(mapData+MAPDATAOFFSET_Player1City);
-  player1StartCityCoords.y = pgm_read_byte(mapData+MAPDATAOFFSET_Player1City+1);
+  player1StartCityCoords.x = header[MAPDATAOFFSET_Player1City];
+  player1StartCityCoords.y = header[MAPDATAOFFSET_Player1City+1];
 
   Point player1StartWorkshopCoords;
-  player1StartWorkshopCoords.x = pgm_read_byte(mapData+MAPDATAOFFSET_Player1Workshop);
-  player1StartWorkshopCoords.y = pgm_read_byte(mapData+MAPDATAOFFSET_Player1Workshop+1);
+  player1StartWorkshopCoords.x = header[MAPDATAOFFSET_Player1Workshop];
+  player1StartWorkshopCoords.y = header[MAPDATAOFFSET_Player1Workshop+1];
 
   // p2 meta Data
   Point player2StartCityCoords;
-  player2StartCityCoords.x = pgm_read_byte(mapData+MAPDATAOFFSET_Player2City);
-  player2StartCityCoords.y = pgm_read_byte(mapData+MAPDATAOFFSET_Player2City+1);
+  player2StartCityCoords.x = header[MAPDATAOFFSET_Player2City];
+  player2StartCityCoords.y = header[MAPDATAOFFSET_Player2City+1];
 
   Point player2StartWorkshopCoords;
-  player2StartWorkshopCoords.x = pgm_read_byte(mapData+MAPDATAOFFSET_Player2Workshop);
-  player2StartWorkshopCoords.y = pgm_read_byte(mapData+MAPDATAOFFSET_Player2Workshop+1);
+  player2StartWorkshopCoords.x = header[MAPDATAOFFSET_Player2Workshop];
+  player2StartWorkshopCoords.y = header[MAPDATAOFFSET_Player2Workshop+1];
 
   //// Load map data
   // Calculate map lenght
@@ -1712,7 +1715,7 @@ void AWGame::drawMapAtPosition(Point pos){
       const MapTileType tileType = tileTypeAt(x, y);
 
       // draw maptile
-      sprites.drawSelfMasked(drawPos.x, drawPos.y, worldSprite, static_cast<uint8_t>(tileType));
+      FX::drawBitmap(drawPos.x, drawPos.y, worldSprite, static_cast<uint8_t>(tileType), dbmWhite);
 
       // check if tile below is the HQ
       if (y < mapSize.y-1) {
@@ -1720,13 +1723,13 @@ void AWGame::drawMapAtPosition(Point pos){
 
         // If it's a headquarter draw upper half at the position above
         if (tileTypeOfTileBelow == MapTileType::P1HQ || tileTypeOfTileBelow == MapTileType::P2HQ) {
-          sprites.drawOverwrite(drawPos.x, drawPos.y, worldSprite, (tileTypeOfTileBelow == MapTileType::P1HQ)?32:33);
+          FX::drawBitmap(drawPos.x, drawPos.y, worldSprite, (tileTypeOfTileBelow == MapTileType::P1HQ)?32:33, dbmNormal);
         }
       }
 
       // draw fog
       if (tile.showsFog && !tile.showSelection) {
-          sprites.drawErase(drawPos.x, drawPos.y, mapFOG_16x16, 0);
+          FX::drawBitmap(drawPos.x, drawPos.y, mapFOG_16x16, 0, dbmMasked);
       }
 
       // Draw marker for buildings
@@ -1736,17 +1739,17 @@ void AWGame::drawMapAtPosition(Point pos){
       else if (mapTileIndexIsBuilding(tileType) && tileType != MapTileType::P1HQ && tileType != MapTileType::P2HQ) {
         if (tile.buildingIsOccupied){
           if(tile.buildingBelongsTo == MapTile::BelongsToPlayer){
-            sprites.drawPlusMask(drawPos.x+10, drawPos.y-2, mapMarkers_plus_mask, 0);
+            FX::drawBitmap(drawPos.x+10, drawPos.y-2, mapMarkers_plus_mask, 0, dbmMasked);
           }
           else if(tile.buildingBelongsTo == MapTile::BelongsToEnemy){
-            sprites.drawPlusMask(drawPos.x+10, drawPos.y-2, mapMarkers_plus_mask, 1);
+            FX::drawBitmap(drawPos.x+10, drawPos.y-2, mapMarkers_plus_mask, 1, dbmMasked);
           }
         }
       }
 
       // draw unit selection
       if (tile.showSelection) {
-        sprites.drawErase(drawPos.x, drawPos.y, selectionAnimation, (arduboy.frameCount/10)%4);
+        FX::drawBitmap(drawPos.x, drawPos.y, selectionAnimation, (arduboy.frameCount/10)%4, dbmMasked);
       }
 
       // Draw Unit
@@ -1764,11 +1767,11 @@ void AWGame::drawMapAtPosition(Point pos){
         else{
           // Don't animate if not active and draw a badge to top right.
           drawUnit(drawPos.x, drawPos.y, &owner == &player1, unit->unitType, false);
-          sprites.drawPlusMask(drawPos.x+10, drawPos.y-2, mapMarkers_plus_mask, 2);
+          FX::drawBitmap(drawPos.x+10, drawPos.y-2, mapMarkers_plus_mask, 2, dbmMasked);
         }
 
         // a fortified unit stands behind sandbags
-        if (unit->fortified) sprites.drawPlusMask(drawPos.x, drawPos.y+8, sandbags_plus_mask, 0);
+        if (unit->fortified) FX::drawBitmap(drawPos.x, drawPos.y+8, sandbags_plus_mask, 0, dbmMasked);
 
         // Show remaining health in the bottom right corner once a unit is hurt,
         // 2 pixels up to leave room for the capture bar.
@@ -1804,6 +1807,7 @@ void AWGame::makeScreenTransition(bool wipeIn){
   // The buffer is not moved: each step sends a shifted copy to the display.
   uint8_t *dbuff = arduboy.getBuffer();
 
+  FX::enableOLED(); // the copies go straight to the screen
   for (uint8_t step = 0; step < arduboy.width(); step++) {
     uint8_t shift = wipeIn ? arduboy.width()-step : step+1;
     for (uint8_t y = 0; y < 8; y++) {
@@ -1816,8 +1820,9 @@ void AWGame::makeScreenTransition(bool wipeIn){
     }
     delay(1);
   }
+  FX::disableOLED();
 
-  if (wipeIn) arduboy.display();
+  if (wipeIn) FX::display();
   else arduboy.clear();
 }
 
@@ -2090,7 +2095,8 @@ void AWGame::printNumber(int16_t x, int16_t y, uint16_t number){
 }
 
 MapTileType AWGame::tileTypeAtIndex(uint16_t index){
-  return static_cast<MapTileType>(pgm_read_byte(mapData+MapDataHeaderSize+index));
+  FX::seekData(mapData+MapDataHeaderSize+index);
+  return static_cast<MapTileType>(FX::readEnd());
 }
 
 MapTileType AWGame::tileTypeAt(int16_t x, int16_t y){
@@ -2111,8 +2117,8 @@ void AWGame::drawUnit(int16_t x, int16_t y, bool firstPlayer, uint8_t unitType, 
   else if (GameUnit::isShip(static_cast<UnitType>(unitType))) {
     lowerBob = bob;
   }
-  sprites.drawPlusMask(x, y+9+lowerBob, firstPlayer ? unitsA_lower_plus_mask : unitsB_lower_plus_mask, unitType);
-  sprites.drawPlusMask(x, y+bob, firstPlayer ? unitsA_upper_plus_mask : unitsB_upper_plus_mask, unitType);
+  FX::drawBitmap(x, y+9+lowerBob, firstPlayer ? unitsA_lower : unitsB_lower, unitType, dbmMasked);
+  FX::drawBitmap(x, y+bob, firstPlayer ? unitsA_upper : unitsB_upper, unitType, dbmMasked);
 
   // A shadow stays on the ground in the bottom row.
   // While a plane floats up it loses 1 pixel at each end.
@@ -2240,11 +2246,11 @@ bool AWGame::playEffect(Point first, Point second, uint8_t effect){
         int8_t dip = (shake < 2);
         int16_t x = position.x + (int8_t)pgm_read_byte(hopShake + shake);
         MapTileType type = tileTypeAt(first.x, first.y);
-        sprites.drawOverwrite(x, position.y+dip, worldSprite, static_cast<uint8_t>(type));
+        FX::drawBitmap(x, position.y+dip, worldSprite, static_cast<uint8_t>(type), dbmNormal);
 
         // the HQ's top half sits on the tile above
         if (type == MapTileType::P1HQ || type == MapTileType::P2HQ)
-          sprites.drawOverwrite(x, position.y+dip-TILE_SIZE, worldSprite, (type == MapTileType::P1HQ)?32:33);
+          FX::drawBitmap(x, position.y+dip-TILE_SIZE, worldSprite, (type == MapTileType::P1HQ)?32:33, dbmNormal);
 
         // on the ground the unit dips with the building
         if (height == 0) { position.y += dip; playSound(SoundThump); }
@@ -2260,7 +2266,7 @@ bool AWGame::playEffect(Point first, Point second, uint8_t effect){
       drawCursor(cursor.x, cursor.y+1, 0);
     }
     drawHudForPlayer(*viewingPlayer);
-    arduboy.display();
+    FX::display();
   }
 
   // the hopping unit is back on the map
@@ -2270,6 +2276,7 @@ bool AWGame::playEffect(Point first, Point second, uint8_t effect){
 
 void AWGame::flashScreen(uint8_t times){
   // the hit: the screen turns inverted for a moment
+  FX::enableOLED(); // invert talks to the screen
   while (times--) {
     playSound(SoundHit);
     arduboy.invert(true);
@@ -2277,6 +2284,7 @@ void AWGame::flashScreen(uint8_t times){
     arduboy.invert(false);
     delay(70);
   }
+  FX::disableOLED();
 }
 
 void AWGame::fillBox(int16_t x, int16_t y, uint8_t w, uint8_t h, uint8_t cut, uint8_t color){
@@ -2294,10 +2302,10 @@ void AWGame::fillBox(int16_t x, int16_t y, uint8_t w, uint8_t h, uint8_t cut, ui
 void AWGame::drawCursor(int16_t x, int16_t y, uint8_t frame){
   // The 32x32 cursor from its pieces. Frame 1 spreads them 2 pixels further out.
   int8_t spread = frame ? 2 : 0;
-  sprites.drawPlusMask(x+4-spread, y+4-spread, cursorCorners_plus_mask, 0);
-  sprites.drawPlusMask(x+20+spread, y+4-spread, cursorCorners_plus_mask, 1);
-  sprites.drawPlusMask(x+4-spread, y+20+spread, cursorCorners_plus_mask, 2);
-  sprites.drawPlusMask(x+22+spread, y+22+spread, cursorHand_plus_mask, frame);
+  FX::drawBitmap(x+4-spread, y+4-spread, cursorCorners_plus_mask, 0, dbmMasked);
+  FX::drawBitmap(x+20+spread, y+4-spread, cursorCorners_plus_mask, 1, dbmMasked);
+  FX::drawBitmap(x+4-spread, y+20+spread, cursorCorners_plus_mask, 2, dbmMasked);
+  FX::drawBitmap(x+22+spread, y+22+spread, cursorHand_plus_mask, frame, dbmMasked);
 }
 
 void AWGame::printAt(int16_t x, int16_t y, char_P *text){

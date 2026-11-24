@@ -3,7 +3,7 @@
 
 #include <Arduboy2.h>
 #include <Tinyfont.h>
-#include <Sprites.h>
+#include <ArduboyFX.h> // draws the art and reads the maps from the FX chip
 #include "List.h"
 
 #include "DataClasses.h"
@@ -98,7 +98,7 @@ private:
 
     // Displays map selection
     // It returns a pointer to the selected map in progmem. nullptr if none was selected
-    const unsigned char * showMapSelection();
+    uint24_t showMapSelection();
 
     // Starts a new single player (against the AI) or multiplayer game
     void startNewGame(AWGameState mode);
@@ -180,7 +180,7 @@ private:
     __attribute__((noinline)) void glideCameraTo(Point target);
 
     // Loads the map from progmem to memory
-    void loadMap(const unsigned char *mapData);
+    void loadMap(uint24_t mapData);
 
     // updates the gamemap for the player
     void updateMapForPlayer(AWPlayer &aPlayer);
@@ -286,10 +286,6 @@ private:
     // wont use the print functions.
     Arduboy2Base arduboy;
 
-    // This is our instance of the Sprites class.
-    // We need this to draw tilesets and animations which Arduboy2 can not do.
-    SpritesB sprites;
-
     // Text uses the small 4x4 letters of the Tinyfont library, drawn by our
     // own printChar. They are much smaller than Arduboy2's font so more fits
     // on the screen. The disadvantage is the poor readability.
@@ -361,7 +357,7 @@ private:
     static constexpr uint8_t MaxMapWidth = 25;
     static constexpr uint8_t MaxMapHeight = 12;
     MapTile mapTileData[MaxMapWidth*MaxMapHeight];
-    const unsigned char *mapData = nullptr; // terrain of the current map in PROGMEM
+    uint24_t mapData = 0; // the current map on the FX chip
     static constexpr uint8_t MapDataHeaderSize = 10; // same as MAPDATAOFFSET_Main in MapData.h
     Point mapSize = {0, 0}; // Mapsize is in Maptile coordinates and not in screen coordinates.
 
