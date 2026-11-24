@@ -1,3 +1,5 @@
+#define ABG_IMPLEMENTATION     // ArduboyG and SpritesU are built here
+#define SPRITESU_IMPLEMENTATION
 #include "AWGame.h"
 
 #include "fxdata/fxdata.h" // addresses of the art and maps on the FX chip
@@ -22,11 +24,16 @@ void AWGame::run(void){
   arduboy.boot();
   arduboy.flashlight();
   // The art and maps live on the FX flash chip. It shares its wires with the
-  // screen, so the screen is only switched on while FX::display() sends a picture.
+  // screen, so the screen is only switched on while showPlane() sends a layer.
   FX::begin(FX_DATA_PAGE);
-  arduboy.setFrameRate(60);
   arduboy.audio.begin();
   soundBegin();
+
+  // Grayscale starts: from now on timer 1 asks for a new layer 156 times a
+  // second, 52 gray pictures a second.
+  FX::enableOLED();
+  arduboy.startGray();
+  FX::disableOLED();
 
   // Set up text
   textColor = BLACK;
@@ -76,87 +83,105 @@ const uint8_t titleSlideX[] PROGMEM = {56, 45, 36, 27, 20, 14, 9, 5, 2, 0};
 // Title screen: the logo top right, the menu below it, the pinup in front of both.
 // With canGoBack (the map choice) the menu can be left with A (returns -1).
 int8_t AWGame::showTitleMenu(char_P * const items[], uint8_t count, bool canGoBack, int8_t cursorIdx){
+  scene = SceneTitle;
+  titleItems = items;
+  titleCount = count;
+  titleCursor = cursorIdx;
 
   // Again a Game loop
   while(true){
 
-    // wait for next frame since we don't want to do things more than that.
-    // There may be isntances where we would do stuff between frames (e.g. smmulations, calculations, etc.)
-    // but for this project we stick with this.
-    if(!arduboy.nextFrame()) continue;
+    // Draw the menu and send it to the screen, once for each gray layer.
+    drawTitle();
+    showPlane();
 
-    // Now we handle the button input of the arduboy
-    arduboy.pollButtons();
+    // The rest happens once per picture: we don't want to do things more often than that.
+    // newPicture() also reads the buttons.
+    if(!newPicture()) continue;
 
     // The menu waits until the logo has dropped.
-    bool menuShows = titleDrop >= TitleDropLength;
-    if (menuShows) {
+    if (titleDrop >= TitleDropLength) {
       // Here we limit and wrap the cursor so it cannot be larger than count-1 nor smaller then 0.
-      if (arduboy.justPressed(UP_BUTTON)) cursorIdx--;
-      if (arduboy.justPressed(DOWN_BUTTON)) cursorIdx++;
-      if (cursorIdx < 0) cursorIdx = count-1;
-      if (cursorIdx >= count) cursorIdx = 0;
+      if (arduboy.justPressed(UP_BUTTON)) titleCursor--;
+      if (arduboy.justPressed(DOWN_BUTTON)) titleCursor++;
+      if (titleCursor < 0) titleCursor = count-1;
+      if (titleCursor >= count) titleCursor = 0;
 
       // React to users choice
-      if (arduboy.justPressed(B_BUTTON)) { playSound(SoundConfirm); return cursorIdx; }
+      if (arduboy.justPressed(B_BUTTON)) { playSound(SoundConfirm); return titleCursor; }
 
       // When the A Button is pressed return nothing.
       if (canGoBack && arduboy.justPressed(A_BUTTON)) { playSound(SoundBack); return -1; }
     }
-
-    // Now we start drawing the menu to the screen
-
-    // This clears the dispaly and makes everything black.
-    arduboy.clear();
-
-    // After power-on and after a match the title comes in:
-    // first the pinup slides in from the left for half a second, slowing down at the end,
-    // then the logo falls in, lands with a thump and shakes sideways for 20 frames.
-    int8_t logoX = 50;
-    int8_t logoY = 2;
-    int8_t pinupX = 0;
-    if (!menuShows) {
-      logoY = pgm_read_byte(titleDropY + titleDrop/5);
-      if (titleDrop < TitleSlideLength) pinupX -= pgm_read_byte(titleSlideX + titleDrop/3);
+    else {
+      // the logo lands with a thump
       if (titleDrop == 50) playSound(SoundThump);
-      if ((uint8_t)(titleDrop - 50) < 20) logoX += (titleDrop & 2) - 1;   // frames 50-69: 1 pixel left, right, left...
       titleDrop++;
     }
-    FX::drawBitmap(logoX, logoY, arduwarsLogo, 0, dbmWhite);
-
-    if (menuShows) {
-      // Behind the chosen item: diagonal stripes, 2 pixels wide with 4 pixel gaps,
-      // moving 1 pixel every 3 frames.
-      int8_t boxY = TitleMenuY + TitleMenuStep*cursorIdx - 2;
-      for (uint8_t y = 0; y < 13; y++) {
-        for (uint8_t x = TitleStripesX + (y + arduboy.frameCount/3) % 6; x < WIDTH; x += 6) {
-          arduboy.fillRect(x, boxY+y, 2, 1, WHITE);
-        }
-      }
-
-      // The menu text. The chosen item gets a black edge so it reads on the stripes.
-      for (uint8_t i = 0; i < count; i++) {
-        int8_t y = TitleMenuY + TitleMenuStep*i + 2;
-        if (i == cursorIdx) {
-          textColor = BLACK;
-          for (int8_t dx = -1; dx <= 1; dx++)
-            for (int8_t dy = -1; dy <= 1; dy++) printAt(TitleMenuX+dx, y+dy, items[i]);
-        }
-        textColor = WHITE;
-        printAt(TitleMenuX, y, items[i]);
-      }
-      textColor = BLACK;
-    }
-
-    // the pinup stands in front of the menu, the stripes run on behind her
-    FX::drawBitmap(pinupX, 2, pinup, 0, dbmNormal);
-
-    // this one draws everything we have drawn to the actual screen.
-    FX::display();
 
     // Now this loop wraps around and keeps repeating until the user selects
     // an menu item.
   }
+}
+
+// The title menu's stripes: for each of 6 columns in a row, which of the
+// 13 rows are white. A row's stripes start 1 pixel further right than the
+// row above, 2 pixels wide, every 6 pixels.
+// Bit y is row y: lit where (pattern - y) mod 6 is 0 or 1.
+static const uint16_t titleStripes[6] PROGMEM = {0x1861, 0x10C3, 0x0186, 0x030C, 0x0618, 0x0C30};
+
+void AWGame::drawTitle(){
+  // After power-on and after a match the title comes in:
+  // first the pinup slides in from the left for half a second, slowing down at the end,
+  // then the logo falls in, lands with a thump and shakes sideways for 20 frames.
+  bool menuShows = titleDrop >= TitleDropLength;
+  int8_t logoX = 50;
+  int8_t logoY = 2;
+  int8_t pinupX = 0;
+  if (!menuShows) {
+    logoY = pgm_read_byte(titleDropY + titleDrop/5);
+    if (titleDrop < TitleSlideLength) pinupX -= pgm_read_byte(titleSlideX + titleDrop/3);
+    if ((uint8_t)(titleDrop - 50) < 20) logoX += (titleDrop & 2) - 1;   // frames 50-69: 1 pixel left, right, left...
+  }
+  drawFX(logoX, logoY, 77, 16, arduwarsLogo, 0, SpritesU::MODE_SELFMASKFX);
+
+  if (menuShows) {
+    // Behind the chosen item: diagonal stripes, 2 pixels wide with 4 pixel gaps,
+    // moving 1 pixel every 3 frames.
+    // Drawn column by column straight into the screen buffer: each column
+    // is one of 6 patterns of 13 rows (titleStripes), moved down to boxY.
+    uint8_t boxY = TitleMenuY + TitleMenuStep*titleCursor - 2;
+    uint8_t *column = arduboy.getBuffer() + (boxY/8)*WIDTH;
+    uint8_t phase = (6 - (arduboy.frameCount/3) % 6) % 6; // the pattern at x = TitleStripesX
+    for (uint8_t x = TitleStripesX; x < WIDTH; x++) {
+      uint32_t pixels = (uint32_t)pgm_read_word(titleStripes + phase) << (boxY % 8);
+      column[x] |= pixels;
+      column[x+WIDTH] |= pixels >> 8;
+      if (boxY < 48) column[x+2*WIDTH] |= pixels >> 16;
+      if (++phase == 6) phase = 0;
+    }
+
+    // The menu text. The chosen item gets a black edge so it reads on the stripes.
+    for (uint8_t i = 0; i < titleCount; i++) {
+      int8_t y = TitleMenuY + TitleMenuStep*i + 2;
+      if (i == titleCursor) {
+        textColor = BLACK;
+        for (int8_t dx = -1; dx <= 1; dx++)
+          for (int8_t dy = -1; dy <= 1; dy++) printAt(TitleMenuX+dx, y+dy, titleItems[i]);
+      }
+      textColor = WHITE;
+      printAt(TitleMenuX, y, titleItems[i]);
+    }
+    textColor = BLACK;
+  }
+
+  // the pinup stands in front of the menu, the stripes run on behind her
+  drawFX(pinupX, 2, 48, 64, pinup, 0, SpritesU::MODE_OVERWRITEFX);
+
+  // Grayscale test: holding A shows a 4-shade picture over the menu.
+  // ponytail: test only, todo 3 replaces it with real gray art.
+  if (arduboy.pressed(A_BUTTON))
+    drawFX(88, 22, 32, 40, graytest, arduboy.currentPlane(), SpritesU::MODE_PLUSMASKFX);
 }
 
 // This method displays the Main menu to the player.
@@ -182,7 +207,8 @@ AWGameState AWGame::showMainMenu(){
 // This method displays the map selection menu to the player.
 // It returns the selected map's address on the FX chip, 0 if cancelled.
 uint24_t AWGame::showMapSelection(){
-  char_P* items[3] = {LOCA_mapSmall, LOCA_mapMedium, LOCA_mapBig};
+  // static: the screen wipe into the match still draws this menu
+  static char_P* const items[3] = {LOCA_mapSmall, LOCA_mapMedium, LOCA_mapBig};
 
   // select map to users choice
   switch (showTitleMenu(items, 3, true, 0)) {
@@ -209,9 +235,6 @@ void AWGame::startNewGame(AWGameState mode){
   // return if no map has been selected
   if (mapData == 0) return;
 
-  // the logo drops in again when the title comes back after the match
-  titleDrop = 0;
-
   // The time the player took in the menus starts the AI's randomness.
   randomState = arduboy.frameCount;
 
@@ -220,6 +243,10 @@ void AWGame::startNewGame(AWGameState mode){
 
   // In single player the AI plays player 2.
   runGame(mode == AWGameState::playSinglePlayer);
+
+  // The logo drops in again when the title comes back after the match.
+  // Not earlier: the wipe into the match still draws the title.
+  titleDrop = 0;
 }
 
 // Adds health to a unit, up to its full health.
@@ -309,25 +336,18 @@ void AWGame::runGame(bool againstAI){
     // update player map
     updateMapForPlayer(viewer);
 
-    // Draw map and HUD for new player
-    arduboy.clear();
-
-    // Calculate camera Position
-    Point cursorPosition = cursorForTile(viewer.cursorIndex);
-
     // Calculate camera position
+    Point cursorPosition = cursorForTile(viewer.cursorIndex);
     cameraPosition = calculateCameraPosition(cursorPosition);
     cameraPosition.y -= mapOffsetY;
 
-    // Draw map
-    drawMapAtPosition(cameraPosition * -1);
-
-    // Draw HUD
-    drawHudForPlayer(viewer);
+    // The new player's view: map and HUD, the cursor comes with the turn.
+    viewingPlayer = &viewer;
+    scene = SceneMap;
+    sceneCursor.x = NoCursor;
 
     // the new view wipes in from black
     if (wipe) makeScreenTransition(true);
-    else FX::display();
 
     // against the AI the turn text pops up on the map
     if (startOnMap) showDialog(LOCA_yourTurn);
@@ -432,11 +452,32 @@ void AWGame::doRoundOfPlayer(AWPlayer &currentPlayer, bool aiTurn){
     // Game loop
     while(true){
 
-        // wait for next frame
-        if(!arduboy.nextFrame()) continue;
+        // Start Drawing, once for each gray layer.
+        // The arrow and the AI use the screen buffer as scratch, so clear it first.
+        arduboy.clear();
 
-        // Handle Button Inputs
-        arduboy.pollButtons();
+        // Draw the map first
+        drawMapAtPosition(cameraPosition * -1);
+
+        // movement arrow from the selected unit to the cursor
+        if (turnState == AWTurnState::UnitSelected)
+          drawPath(selectedUnit, cameraPosition);
+
+        // draw relevant cursor helper
+        if ((turnState == AWTurnState::UnitSelected || turnState == AWTurnState::UnitWalking) && walkerSeen) {
+
+          // draw the unit on top of the arrow, or where it walks
+          drawUnit(walkPosition.x-cameraPosition.x, walkPosition.y-cameraPosition.y, currentPlayer == player1, selectedUnit->unitType, true);
+        }
+
+        // Draw the cursor on top and the HUD
+        drawSceneTop();
+
+        // Draw everything
+        showPlane();
+
+        // The rest runs once per picture. newPicture() also reads the buttons.
+        if(!newPicture()) continue;
 
         if (turnState == AWTurnState::UnitWalking) {
           if (walkFrame == pathLength*(TILE_SIZE/2)) {
@@ -551,7 +592,7 @@ void AWGame::doRoundOfPlayer(AWPlayer &currentPlayer, bool aiTurn){
         currentIndex.y = ((int16_t)(cursorPosition.y+TILE_SIZE))/TILE_SIZE;
 
         // Update the movement arrow when the cursor reaches a new tile.
-        // This uses the screen buffer as scratch, so it must run before clear().
+        // This uses the screen buffer as scratch, the next drawing clears it.
         if (turnState == AWTurnState::UnitSelected && !(currentIndex == pathEnd)) {
           pathEnd = currentIndex;
           if (tileAt(currentIndex.x, currentIndex.y).showSelection)
@@ -560,32 +601,10 @@ void AWGame::doRoundOfPlayer(AWPlayer &currentPlayer, bool aiTurn){
             pathLength = 0;
         }
 
-        // Start Drawing
-        arduboy.clear();
-
-        // Draw the map first
-        drawMapAtPosition(cameraPosition * -1);
-
-        // movement arrow from the selected unit to the cursor
-        if (turnState == AWTurnState::UnitSelected)
-          drawPath(selectedUnit, cameraPosition);
-
-        // draw relevant cursor helper
-        if ((turnState == AWTurnState::UnitSelected || turnState == AWTurnState::UnitWalking) && walkerSeen) {
-
-          // draw the unit on top of the arrow, or where it walks
-          drawUnit(walkPosition.x-cameraPosition.x, walkPosition.y-cameraPosition.y, currentPlayer == player1, selectedUnit->unitType, true);
-        }
-
-        // Draw the cursor on top. The AI plays without one.
-        if (!aiTurn)
-          drawCursor(cursorPosition.x-cameraPosition.x, cursorPosition.y-cameraPosition.y+1, (arduboy.frameCount/30)%2); // the y+1 looks more correct
-
-        // Draw HUD
-        drawHudForPlayer(viewer);
-
-        // Draw everything
-        FX::display();
+        // Where the cursor shows on the screen. The AI plays without one.
+        // Boxes over the map draw it there too.
+        sceneCursor.x = aiTurn ? NoCursor : cursorPosition.x-cameraPosition.x;
+        sceneCursor.y = cursorPosition.y-cameraPosition.y+1; // the y+1 looks more correct
 
         // no buttons while a unit walks
         if (turnState == AWTurnState::UnitWalking) continue;
@@ -599,7 +618,8 @@ void AWGame::doRoundOfPlayer(AWPlayer &currentPlayer, bool aiTurn){
 
         // The AI's turn: no buttons, it plays its units one by one.
         // Its thinking lives in AWGameAI.cpp. It borrows the screen buffer,
-        // so it runs here, between display() and the next clear().
+        // the next drawing clears it. It thinks longer than a layer lasts,
+        // so holdScreen() keeps the last layer on the screen meanwhile.
         if (aiTurn) {
           if (turnState == AWTurnState::UnitMoved) {
             // the unit arrived: attack or capture
@@ -616,11 +636,13 @@ void AWGame::doRoundOfPlayer(AWPlayer &currentPlayer, bool aiTurn){
 
           // all units are done: buy new ones and end the turn
           if (selectedUnit == nullptr) {
+            holdScreen();
             aiBuyUnits(currentPlayer);
             return;
           }
 
           Point start = {selectedUnit->mapPosX, selectedUnit->mapPosY};
+          holdScreen();
           Point destination = aiPlanMove(selectedUnit, currentPlayer, aiTarget);
           if (destination == start) {
             // it stays: with nothing to attack or capture it fortifies
@@ -645,7 +667,7 @@ void AWGame::doRoundOfPlayer(AWPlayer &currentPlayer, bool aiTurn){
         }
 
         // The unit has walked to its destination: ask what it does there.
-        // The menu draws on top of the frame we just showed.
+        // The menu draws the map behind itself.
         if (turnState == AWTurnState::UnitMoved) {
 
           // Build the options for this unit and destination.
@@ -926,44 +948,43 @@ void AWGame::showDialog(char_P *titleText){
 }
 
 void AWGame::showResults(char_P *titleText, bool againstAI){
-  // box over the last map view, drawn once
-  fillBox(8, 8, 112, 55, 3, BLACK);
-  fillBox(9, 9, 110, 52, 3, WHITE);
-
-  // result centered on top, letters are 5 pixels apart
-  printAt(64 - strlen_P(titleText)*5/2, 13, titleText);
-
-  // column per side
-  printAt(64, 23, againstAI ? LOCA_you : LOCA_p1);
-  printAt(92, 23, againstAI ? LOCA_enemy : LOCA_p2);
-
-  // days are shared, the same number as in the top bar
-  printAt(13, 31, LOCA_days);
-  printNumber(64, 31, daysPlayed);
-  printAt(13, 38, LOCA_destroyed);
-  printAt(13, 45, LOCA_buildings);
-  printAt(13, 52, LOCA_money);
-
-  for (uint8_t side = 0; side < 2; side++) {
-    uint8_t held = 0;
-    for (uint8_t i = 0; i < gameBuildings.getCount(); i++) {
-      if (gameBuildings[i].isOccupied && gameBuildings[i].belongsToPlayer == side) held++;
-    }
-    uint8_t x = 64 + 28*side;
-    printNumber(x, 38, unitsDestroyed[side]);
-    printNumber(x, 45, held);
-
-    // money counts in hundreds and moves in whole thousands: 40 is 4K
-    // ponytail: the cap 255 shows as 25K, prices and income are multiples of 10
-    printNumber(x, 52, (side ? player2.money : player1.money)/10);
-    printChar('K');
-  }
-  FX::display();
-
   // B goes back to the title
   while (true) {
-    if (!arduboy.nextFrame()) continue;
-    arduboy.pollButtons();
+    // box over the last map view
+    drawScene();
+    fillBox(8, 8, 112, 55, 3, BLACK);
+    fillBox(9, 9, 110, 52, 3, WHITE);
+
+    // result centered on top, letters are 5 pixels apart
+    printAt(64 - strlen_P(titleText)*5/2, 13, titleText);
+
+    // column per side
+    printAt(64, 23, againstAI ? LOCA_you : LOCA_p1);
+    printAt(92, 23, againstAI ? LOCA_enemy : LOCA_p2);
+
+    // days are shared, the same number as in the top bar
+    printAt(13, 31, LOCA_days);
+    printNumber(64, 31, daysPlayed);
+    printAt(13, 38, LOCA_destroyed);
+    printAt(13, 45, LOCA_buildings);
+    printAt(13, 52, LOCA_money);
+
+    for (uint8_t side = 0; side < 2; side++) {
+      uint8_t held = 0;
+      for (uint8_t i = 0; i < gameBuildings.getCount(); i++) {
+        if (gameBuildings[i].isOccupied && gameBuildings[i].belongsToPlayer == side) held++;
+      }
+      uint8_t x = 64 + 28*side;
+      printNumber(x, 38, unitsDestroyed[side]);
+      printNumber(x, 45, held);
+
+      // money counts in hundreds and moves in whole thousands: 40 is 4K
+      // ponytail: the cap 255 shows as 25K, prices and income are multiples of 10
+      printNumber(x, 52, (side ? player2.money : player1.money)/10);
+      printChar('K');
+    }
+    showPlane();
+    if (!newPicture()) continue;
     if (arduboy.justPressed(B_BUTTON)) { playSound(SoundConfirm); return; }
   }
 }
@@ -998,28 +1019,9 @@ int8_t AWGame::showBox(char_P * const options[], uint8_t count, bool isDialog, u
   // dialog loop
   while (true) {
 
-    // wait for next frame
-    if(!arduboy.nextFrame()) continue;
+    // Drawing, once for each gray layer: what is behind the box, then the box.
+    drawScene();
 
-    // Get input
-    arduboy.pollButtons();
-
-    // Close dialog and return with selected index.
-    // A dialog only exits on B.
-    if (arduboy.justPressed(B_BUTTON)) { playSound(SoundConfirm); return selectedIndex; }
-
-    if (!isDialog) {
-      // Cancel
-      if (arduboy.justPressed(A_BUTTON)) { playSound(SoundBack); return -1; }
-      if (arduboy.justPressed(DOWN_BUTTON)) selectedIndex++;
-      if (arduboy.justPressed(UP_BUTTON)) selectedIndex--;
-
-      // wrap and limit index
-      if (selectedIndex < 0) selectedIndex = count-1;
-      if (selectedIndex >= count) selectedIndex = 0;
-    }
-
-    // Drawing
     // Infobox
     fillBox(frame.x, frame.y, frame.width, frame.height, 3, BLACK);
     fillBox(frame.x + 1, frame.y + 1, frame.width-2, frame.height-3, 3, WHITE);
@@ -1039,7 +1041,25 @@ int8_t AWGame::showBox(char_P * const options[], uint8_t count, bool isDialog, u
       printAt(frame.x + 4, textY + 7*selectedIndex, LOCA_Cursor);
     }
 
-    FX::display();
+    showPlane();
+
+    // Get input, once per picture
+    if(!newPicture()) continue;
+
+    // Close dialog and return with selected index.
+    // A dialog only exits on B.
+    if (arduboy.justPressed(B_BUTTON)) { playSound(SoundConfirm); return selectedIndex; }
+
+    if (!isDialog) {
+      // Cancel
+      if (arduboy.justPressed(A_BUTTON)) { playSound(SoundBack); return -1; }
+      if (arduboy.justPressed(DOWN_BUTTON)) selectedIndex++;
+      if (arduboy.justPressed(UP_BUTTON)) selectedIndex--;
+
+      // wrap and limit index
+      if (selectedIndex < 0) selectedIndex = count-1;
+      if (selectedIndex >= count) selectedIndex = 0;
+    }
   }
 }
 
@@ -1061,48 +1081,13 @@ UnitType AWGame::showShopForBuildingAndPlayer(MapTileType building, AWPlayer &aP
 
   // game Loop
   while (true) {
-    // wait for next frame
-    if(!arduboy.nextFrame()) continue;
-
-    // Get input
-    arduboy.pollButtons();
-
-    if (arduboy.justPressed(DOWN_BUTTON)){
-      menuCursorIDX++;
-    }
-    if (arduboy.justPressed(UP_BUTTON)){
-      menuCursorIDX--;
-    }
-    // Exit on A button press
-    if (arduboy.justPressed(A_BUTTON)){
-      playSound(SoundBack);
-      return UnitType::None;
-    }
-    // Buy Unit on button press
-    if (arduboy.justPressed(B_BUTTON)){
-      playSound(SoundConfirm);
-      // get selected unit
-      UnitType unitToBuy = static_cast<UnitType>(pgm_read_byte(buyableUnits+menuCursorIDX));
-      uint8_t unitCosts = GameUnit::costsOfUnit(unitToBuy);
-
-      // check if user has enough money to buy
-      if (unitCosts <= aPlayer.money) {
-
-        // substract the amount from the players funds
-        aPlayer.money -= unitCosts;
-
-        // return the unit
-        return unitToBuy;
-      }
-    }
-
-    // limit and wrap the cursor
-    menuCursorIDX = max(menuCursorIDX, 0);
-    menuCursorIDX = min(menuCursorIDX, numberOfUnits-1);
+    // scroll the list so the cursor stays on screen
     yOffset = (4-menuCursorIDX)*textPadding;
     yOffset = min(yOffset, 0);
 
-    // Drawing
+    // Drawing, once for each gray layer: the map behind, then the shop
+    drawScene();
+
     // Infobox
     fillBox(3, 9, arduboy.width()-6, arduboy.height()-10, 3, BLACK);
     fillBox(4, 10, arduboy.width()-8, arduboy.height()-13, 2, WHITE);
@@ -1171,7 +1156,43 @@ UnitType AWGame::showShopForBuildingAndPlayer(MapTileType building, AWPlayer &aP
     printAt(76, 50, LOCA_Trait_speed);
     printNumber(115, 50, traits.moveDistance);
 
-    FX::display();
+    showPlane();
+
+    // Get input, once per picture
+    if(!newPicture()) continue;
+
+    if (arduboy.justPressed(DOWN_BUTTON)){
+      menuCursorIDX++;
+    }
+    if (arduboy.justPressed(UP_BUTTON)){
+      menuCursorIDX--;
+    }
+    // Exit on A button press
+    if (arduboy.justPressed(A_BUTTON)){
+      playSound(SoundBack);
+      return UnitType::None;
+    }
+    // Buy Unit on button press
+    if (arduboy.justPressed(B_BUTTON)){
+      playSound(SoundConfirm);
+      // get selected unit
+      UnitType unitToBuy = static_cast<UnitType>(pgm_read_byte(buyableUnits+menuCursorIDX));
+      uint8_t unitCosts = GameUnit::costsOfUnit(unitToBuy);
+
+      // check if user has enough money to buy
+      if (unitCosts <= aPlayer.money) {
+
+        // substract the amount from the players funds
+        aPlayer.money -= unitCosts;
+
+        // return the unit
+        return unitToBuy;
+      }
+    }
+
+    // limit the cursor
+    menuCursorIDX = max(menuCursorIDX, 0);
+    menuCursorIDX = min(menuCursorIDX, numberOfUnits-1);
   }
 
   return UnitType::None;
@@ -1179,8 +1200,8 @@ UnitType AWGame::showShopForBuildingAndPlayer(MapTileType building, AWPlayer &aP
 
 void AWGame::drawHudForPlayer(AWPlayer &aPlayer){
   // Draw player, day and funds
-  arduboy.fillRect(0, 0, 128, 7, BLACK);
-  arduboy.fillRect(0, 0, 128, 6, WHITE);
+  fillRect(0, 0, 128, 7, BLACK);
+  fillRect(0, 0, 128, 6, WHITE);
   printAt(1, 1, (aPlayer == player1) ? LOCA_p1 : LOCA_p2);
 
   printAt(14, 1, LOCA_day);
@@ -1194,9 +1215,11 @@ void AWGame::drawHudForPlayer(AWPlayer &aPlayer){
 
   // the money ends 1 pixel from the right edge, like P1 on the left
   uint16_t money = aPlayer.money*100;
-  uint8_t x = 128;
-  uint16_t rest = money;
-  do { x -= 5; rest /= 10; } while (rest > 0);
+  uint8_t x = 128-5;
+  if (money >= 10) x -= 5;
+  if (money >= 100) x -= 5;
+  if (money >= 1000) x -= 5;
+  if (money >= 10000) x -= 5;
   printAt(x-14, 1, LOCA_funds);
   printNumber(x, 1, money);
 }
@@ -1600,7 +1623,7 @@ void AWGame::drawPath(const GameUnit *aUnit, Point camera){
       int16_t top = min(y, ny);
       uint8_t width = abs(nx - x);
       uint8_t height = abs(ny - y);
-      arduboy.fillRect(left-1-grow, top-1-grow, width+4+2*grow, height+4+2*grow, color);
+      fillRect(left-1-grow, top-1-grow, width+4+2*grow, height+4+2*grow, color);
       x = nx;
       y = ny;
     }
@@ -1615,9 +1638,9 @@ void AWGame::drawPath(const GameUnit *aUnit, Point camera){
       // distance from the tile centre along the arrow (mirrored for left and up)
       int8_t along = forward ? 3+row : -2-row-grow;
       if (horizontal)
-        arduboy.fillRect(x+along, y+1-half, length, 2*half, color);
+        fillRect(x+along, y+1-half, length, 2*half, color);
       else
-        arduboy.fillRect(x+1-half, y+along, 2*half, length, color);
+        fillRect(x+1-half, y+along, 2*half, length, color);
     }
   }
 }
@@ -1700,36 +1723,53 @@ void AWGame::drawMapAtPosition(Point pos){
   // In this variable we store the
   Point drawPos;
 
+  // Only the tiles on the screen. A row that starts right below the screen
+  // still counts: its markers reach 2 pixels up. The bottom row is always
+  // black in grayscale, so a row starting there or lower shows nothing.
+  // Grayscale draws the map 3 times per picture, so this must be quick.
+  int16_t cameraX = -pos.x;
+  int16_t cameraY = -pos.y;
+  int8_t firstX = max(cameraX >> 4, 0);
+  int8_t lastX = min((cameraX + WIDTH-1) >> 4, mapSize.x-1);
+  int8_t firstY = max(cameraY >> 4, 0);
+  int8_t lastY = min((cameraY + HEIGHT) >> 4, mapSize.y-1);
+  if (lastX < firstX) return;
+
+  // the terrain of a row and of the row below, read from the FX chip in one go each
+  uint8_t row[WIDTH/TILE_SIZE+1];
+  uint8_t below[WIDTH/TILE_SIZE+1];
+
   // draw the map
-  for (int8_t y = 0; y < mapSize.y; y++) {
-    for (int8_t x = mapSize.x-1; x >= 0; x--) { // draw the map from right to left helps with the markers
+  for (int8_t y = firstY; y <= lastY; y++) {
+    uint24_t rowStart = mapData + MapDataHeaderSize + y*mapSize.x + firstX;
+    FX::readDataBytes(rowStart, row, lastX-firstX+1);
+    if (y < mapSize.y-1) FX::readDataBytes(rowStart + mapSize.x, below, lastX-firstX+1);
+
+    for (int8_t x = lastX; x >= firstX; x--) { // draw the map from right to left helps with the markers
 
       drawPos.x = pos.x+x*TILE_SIZE;
       drawPos.y = pos.y+y*TILE_SIZE;
 
-      // ignore if out of bounds
-      if (drawPos.x <= -TILE_SIZE || drawPos.x >= arduboy.width() || drawPos.y <= -TILE_SIZE || drawPos.y >= (arduboy.height()+TILE_SIZE)) continue;
-
       // get the tile
       const MapTile tile = tileAt(x, y);
-      const MapTileType tileType = tileTypeAt(x, y);
+      const MapTileType tileType = static_cast<MapTileType>(row[x-firstX]);
 
       // draw maptile
-      FX::drawBitmap(drawPos.x, drawPos.y, worldSprite, static_cast<uint8_t>(tileType), dbmWhite);
+      drawFX(drawPos.x, drawPos.y, 16, 16, worldSprite, static_cast<uint8_t>(tileType), SpritesU::MODE_SELFMASKFX);
 
       // check if tile below is the HQ
       if (y < mapSize.y-1) {
-        const MapTileType tileTypeOfTileBelow = tileTypeAt(x, y+1);
+        const MapTileType tileTypeOfTileBelow = static_cast<MapTileType>(below[x-firstX]);
 
         // If it's a headquarter draw upper half at the position above
         if (tileTypeOfTileBelow == MapTileType::P1HQ || tileTypeOfTileBelow == MapTileType::P2HQ) {
-          FX::drawBitmap(drawPos.x, drawPos.y, worldSprite, (tileTypeOfTileBelow == MapTileType::P1HQ)?32:33, dbmNormal);
+          drawFX(drawPos.x, drawPos.y, 16, 16, worldSprite, (tileTypeOfTileBelow == MapTileType::P1HQ)?32:33, SpritesU::MODE_OVERWRITEFX);
         }
       }
 
       // draw fog
       if (tile.showsFog && !tile.showSelection) {
-          FX::drawBitmap(drawPos.x, drawPos.y, mapFOG_16x16, 0, dbmMasked);
+          drawFog(drawPos.x, drawPos.y);
       }
 
       // Draw marker for buildings
@@ -1739,17 +1779,17 @@ void AWGame::drawMapAtPosition(Point pos){
       else if (mapTileIndexIsBuilding(tileType) && tileType != MapTileType::P1HQ && tileType != MapTileType::P2HQ) {
         if (tile.buildingIsOccupied){
           if(tile.buildingBelongsTo == MapTile::BelongsToPlayer){
-            FX::drawBitmap(drawPos.x+10, drawPos.y-2, mapMarkers_plus_mask, 0, dbmMasked);
+            drawFX(drawPos.x+10, drawPos.y-2, 8, 8, mapMarkers_plus_mask, 0, SpritesU::MODE_PLUSMASKFX);
           }
           else if(tile.buildingBelongsTo == MapTile::BelongsToEnemy){
-            FX::drawBitmap(drawPos.x+10, drawPos.y-2, mapMarkers_plus_mask, 1, dbmMasked);
+            drawFX(drawPos.x+10, drawPos.y-2, 8, 8, mapMarkers_plus_mask, 1, SpritesU::MODE_PLUSMASKFX);
           }
         }
       }
 
       // draw unit selection
       if (tile.showSelection) {
-        FX::drawBitmap(drawPos.x, drawPos.y, selectionAnimation, (arduboy.frameCount/10)%4, dbmMasked);
+        drawFX(drawPos.x, drawPos.y, 16, 16, selectionAnimation, (arduboy.frameCount/10)%4, SpritesU::MODE_PLUSMASKFX);
       }
 
       // Draw Unit
@@ -1767,11 +1807,11 @@ void AWGame::drawMapAtPosition(Point pos){
         else{
           // Don't animate if not active and draw a badge to top right.
           drawUnit(drawPos.x, drawPos.y, &owner == &player1, unit->unitType, false);
-          FX::drawBitmap(drawPos.x+10, drawPos.y-2, mapMarkers_plus_mask, 2, dbmMasked);
+          drawFX(drawPos.x+10, drawPos.y-2, 8, 8, mapMarkers_plus_mask, 2, SpritesU::MODE_PLUSMASKFX);
         }
 
         // a fortified unit stands behind sandbags
-        if (unit->fortified) FX::drawBitmap(drawPos.x, drawPos.y+8, sandbags_plus_mask, 0, dbmMasked);
+        if (unit->fortified) drawFX(drawPos.x, drawPos.y+8, 16, 8, sandbags_plus_mask, 0, SpritesU::MODE_PLUSMASKFX);
 
         // Show remaining health in the bottom right corner once a unit is hurt,
         // 2 pixels up to leave room for the capture bar.
@@ -1782,8 +1822,8 @@ void AWGame::drawMapAtPosition(Point pos){
         int16_t textY = drawPos.y+9;
         if (unit->healthPoints < GameUnit::UnitDefaultHealth &&
             textX >= 0 && textX <= arduboy.width()-4 && textY >= 0 && textY <= arduboy.height()-8) {
-          arduboy.fillRect(drawPos.x+10, drawPos.y+7, 6, 7, BLACK);
-          arduboy.fillRect(drawPos.x+11, drawPos.y+8, 5, 6, WHITE);
+          fillRect(drawPos.x+10, drawPos.y+7, 6, 7, BLACK);
+          fillRect(drawPos.x+11, drawPos.y+8, 5, 6, WHITE);
           printNumber(textX, textY, unit->healthPoints);
         }
       }
@@ -1800,30 +1840,55 @@ void AWGame::drawMapAtPosition(Point pos){
   }
 }
 
+void AWGame::drawFog(int16_t x, int16_t y){
+  // Fog turns every second pixel of the tile black, a checker pattern:
+  // the same pixels as drawing mapFOG_16x16 masked, but straight in the
+  // screen buffer, which is much quicker.
+  // Pixel (X, Y) turns black when X + Y + x + y is even.
+  int8_t top = max(y, 0);
+  int8_t bottom = min(y + TILE_SIZE, HEIGHT); // first row below the tile
+  uint8_t left = max(x, 0);
+  int8_t width = min(x + TILE_SIZE, WIDTH) - left;
+  if (top >= bottom || width <= 0) return;
+  uint8_t evenColumn = ((left + x + y) & 1) ? 0xAA : 0x55; // rows that turn black in the first column
+  uint8_t *column = arduboy.getBuffer() + (top/8)*WIDTH + left;
+  for (uint8_t page = top/8; page <= (bottom-1)/8; page++) {
+    // the rows of this page that belong to the tile
+    uint8_t rows = 0xFF;
+    if (page == top/8) rows &= 0xFF << (top % 8);
+    if (page == (bottom-1)/8) rows &= 0xFF >> (7 - (bottom-1) % 8);
+    uint8_t keep = ~(evenColumn & rows);
+    uint8_t keepNext = ~(~evenColumn & rows);
+    uint8_t *pixels = column;
+    for (uint8_t n = width; n > 0; n--) {
+      *pixels++ &= keep;
+      uint8_t swap = keep; keep = keepNext; keepNext = swap;
+    }
+    column += WIDTH;
+  }
+}
+
 void AWGame::makeScreenTransition(bool wipeIn){
   // The rows of 8 pixels slide sideways, even rows one way, odd rows the other.
-  // Wiping out, the screen ends black. Wiping in, the frame in the buffer
-  // slides in from black, the wipe out played backwards.
-  // The buffer is not moved: each step sends a shifted copy to the display.
+  // Wiping out, the scene slides away and the screen ends black. Wiping in,
+  // the scene slides in from black, the wipe out played backwards.
+  // Each layer draws the scene and moves its rows in the buffer.
+  // 6 pixels per picture: 22 pictures, about as long as the old wipe.
   uint8_t *dbuff = arduboy.getBuffer();
-
-  FX::enableOLED(); // the copies go straight to the screen
-  for (uint8_t step = 0; step < arduboy.width(); step++) {
-    uint8_t shift = wipeIn ? arduboy.width()-step : step+1;
+  uint8_t step = 0;
+  while (step < 22) {
+    drawScene();
+    uint8_t shift = wipeIn ? 128-6*step : 6*(step+1);
+    if (shift > 128) shift = 128;
     for (uint8_t y = 0; y < 8; y++) {
-      for (uint8_t x = 0; x < arduboy.width(); x++) {
-        // a source left of the screen wraps around to 128 and up, so the
-        // one check below catches both edges
-        uint8_t source = (y%2 == 0) ? x+shift : x-shift;
-        Arduboy2Core::SPItransfer((source < arduboy.width()) ? dbuff[source+y*arduboy.width()] : 0);
-      }
+      uint8_t *row = dbuff + y*WIDTH;
+      if (y%2 == 0) { memmove(row, row+shift, WIDTH-shift); memset(row+WIDTH-shift, 0, shift); }
+      else { memmove(row+shift, row, WIDTH-shift); memset(row, 0, shift); }
     }
-    delay(1);
+    showPlane();
+    if (newPicture()) step++;
   }
-  FX::disableOLED();
-
-  if (wipeIn) FX::display();
-  else arduboy.clear();
+  if (!wipeIn) scene = SceneBlack;
 }
 
 GameBuilding * AWGame::getBuildingAtCoordinate(Point coordinate){
@@ -2063,8 +2128,8 @@ void AWGame::drawCaptureBar(Point drawPos, const GameBuilding &building){
   uint8_t full = GameBuilding::capturePointsFor(building.buildingType);
   if (building.healthPoints >= full) return; // no bar at full points
   uint8_t left = (uint8_t)(building.healthPoints*7)/(full/2);
-  arduboy.fillRect(drawPos.x, drawPos.y+14, 16, 4, BLACK);
-  arduboy.fillRect(drawPos.x+1+left, drawPos.y+15, 14-left, 2, WHITE);
+  fillRect(drawPos.x, drawPos.y+14, 16, 4, BLACK);
+  fillRect(drawPos.x+1+left, drawPos.y+15, 14-left, 2, WHITE);
 }
 
 GameUnit *AWGame::firstReadyUnit(AWPlayer &aPlayer){
@@ -2086,8 +2151,9 @@ void AWGame::printNumber(int16_t x, int16_t y, uint16_t number){
   char digits[5];
   uint8_t count = 0;
   do {
-    digits[count++] = '0' + number % 10;
-    number /= 10;
+    uint16_t tens = number / 10;
+    digits[count++] = '0' + (number - tens*10); // one division per digit
+    number = tens;
   } while (number > 0);
   printX = x;
   printY = y;
@@ -2117,15 +2183,15 @@ void AWGame::drawUnit(int16_t x, int16_t y, bool firstPlayer, uint8_t unitType, 
   else if (GameUnit::isShip(static_cast<UnitType>(unitType))) {
     lowerBob = bob;
   }
-  FX::drawBitmap(x, y+9+lowerBob, firstPlayer ? unitsA_lower : unitsB_lower, unitType, dbmMasked);
-  FX::drawBitmap(x, y+bob, firstPlayer ? unitsA_upper : unitsB_upper, unitType, dbmMasked);
+  drawFX(x, y+9+lowerBob, 16, 8, firstPlayer ? unitsA_lower : unitsB_lower, unitType, SpritesU::MODE_PLUSMASKFX);
+  drawFX(x, y+bob, 16, 16, firstPlayer ? unitsA_upper : unitsB_upper, unitType, SpritesU::MODE_PLUSMASKFX);
 
   // A shadow stays on the ground in the bottom row.
   // While a plane floats up it loses 1 pixel at each end.
   uint8_t shadow = pgm_read_byte((firstPlayer ? unitsA_shadows : unitsB_shadows) + unitType);
   if (shadow) {
     uint8_t up = bob < 0;
-    arduboy.fillRect(x + (shadow >> 4) + up, y + 15, (shadow & 0x0F) - 2*up, 1, BLACK);
+    fillRect(x + (shadow >> 4) + up, y + 15, (shadow & 0x0F) - 2*up, 1, BLACK);
   }
 }
 
@@ -2219,12 +2285,11 @@ bool AWGame::playEffect(Point first, Point second, uint8_t effect){
 
   if (effect == EffectFlicker) playSound(SoundDestroyed);
 
+  // boxes after the effect show the map without the turn's cursor
+  sceneCursor.x = NoCursor;
+
   uint8_t frame = 0;
   while (frame < 60) {
-    while (!arduboy.nextFrame()) {}
-    glideCameraTo(target);
-    if (cameraPosition == target) frame++;
-
     // on for 10 frames, off for 10
     bool on = (frame/10)%2 == 0;
     if (effect == EffectFlicker) firstTile.hasUnit = on;
@@ -2246,14 +2311,14 @@ bool AWGame::playEffect(Point first, Point second, uint8_t effect){
         int8_t dip = (shake < 2);
         int16_t x = position.x + (int8_t)pgm_read_byte(hopShake + shake);
         MapTileType type = tileTypeAt(first.x, first.y);
-        FX::drawBitmap(x, position.y+dip, worldSprite, static_cast<uint8_t>(type), dbmNormal);
+        drawFX(x, position.y+dip, 16, 16, worldSprite, static_cast<uint8_t>(type), SpritesU::MODE_OVERWRITEFX);
 
         // the HQ's top half sits on the tile above
         if (type == MapTileType::P1HQ || type == MapTileType::P2HQ)
-          FX::drawBitmap(x, position.y+dip-TILE_SIZE, worldSprite, (type == MapTileType::P1HQ)?32:33, dbmNormal);
+          drawFX(x, position.y+dip-TILE_SIZE, 16, 16, worldSprite, (type == MapTileType::P1HQ)?32:33, SpritesU::MODE_OVERWRITEFX);
 
         // on the ground the unit dips with the building
-        if (height == 0) { position.y += dip; playSound(SoundThump); }
+        if (height == 0) position.y += dip;
       }
       AWPlayer &owner = (firstTile.unitBelongsTo == MapTile::BelongsToPlayer1) ? player1 : player2;
       drawUnit(position.x, position.y - height, &owner == &player1, owner.getUnitForMapCoordinates(first)->unitType, false);
@@ -2266,7 +2331,17 @@ bool AWGame::playEffect(Point first, Point second, uint8_t effect){
       drawCursor(cursor.x, cursor.y+1, 0);
     }
     drawHudForPlayer(*viewingPlayer);
-    FX::display();
+    showPlane();
+
+    // the next step, once per picture
+    if (!newPicture()) continue;
+    glideCameraTo(target);
+    if (cameraPosition == target) {
+      frame++;
+      // a landing on the shaking building thumps
+      uint8_t step = pgm_read_byte(hopFrames + frame);
+      if (effect == EffectHop && frame < 60 && (step >> 4) && !(step & 0x0F)) playSound(SoundThump);
+    }
   }
 
   // the hopping unit is back on the map
@@ -2275,16 +2350,72 @@ bool AWGame::playEffect(Point first, Point second, uint8_t effect){
 }
 
 void AWGame::flashScreen(uint8_t times){
-  // the hit: the screen turns inverted for a moment
-  FX::enableOLED(); // invert talks to the screen
+  // the hit: the screen turns inverted for a moment, 4 pictures on, 4 off
   while (times--) {
     playSound(SoundHit);
+    FX::enableOLED(); // invert talks to the screen
     arduboy.invert(true);
-    delay(70);
+    FX::disableOLED();
+    showScene(4);
+    FX::enableOLED();
     arduboy.invert(false);
-    delay(70);
+    FX::disableOLED();
+    showScene(4);
   }
+}
+
+void AWGame::showScene(uint8_t pictures){
+  while (pictures) {
+    drawScene();
+    showPlane();
+    if (newPicture()) pictures--;
+  }
+}
+
+void AWGame::drawScene(){
+  // the screen buffer may hold scratch from the AI or the movement range
+  arduboy.clear();
+  if (scene == SceneTitle) drawTitle();
+  if (scene != SceneMap) return;
+  drawMapAtPosition(cameraPosition * -1);
+  drawSceneTop();
+}
+
+void AWGame::drawSceneTop(){
+  if (sceneCursor.x != NoCursor) drawCursor(sceneCursor.x, sceneCursor.y, (arduboy.frameCount/30)%2);
+  drawHudForPlayer(*viewingPlayer);
+}
+
+void AWGame::showPlane(){
+  // The screen and the FX chip share their wires: the screen listens only now.
+  FX::enableOLED();
+  arduboy.waitForNextPlane();
   FX::disableOLED();
+}
+
+bool AWGame::newPicture(){
+  if (!arduboy.needsUpdate()) return false;
+  arduboy.frameCount++;
+  arduboy.pollButtons();
+  return true;
+}
+
+void AWGame::holdScreen(){
+  // Between layers the screen rests on its black bottom row. Showing all
+  // 64 rows again keeps the last layer up until the next one comes.
+  // ponytail: the last layer is the white one, so the grays show black
+  // while the AI thinks. Black and white art looks the same.
+  FX::enableOLED();
+  arduboy.sendLCDCommand(0xA8);
+  arduboy.sendLCDCommand(63);
+  FX::disableOLED();
+}
+
+void AWGame::fillRect(int16_t x, int16_t y, uint8_t w, uint8_t h, uint8_t color){
+  // SpritesU fills whole bytes at once. It takes 8 bit positions, so
+  // anything below the screen must stop here.
+  if (y >= HEIGHT) return;
+  SpritesU::fillRect(x, y, w, h, arduboy.color(color));
 }
 
 void AWGame::fillBox(int16_t x, int16_t y, uint8_t w, uint8_t h, uint8_t cut, uint8_t color){
@@ -2293,19 +2424,19 @@ void AWGame::fillBox(int16_t x, int16_t y, uint8_t w, uint8_t h, uint8_t cut, ui
   // fillRoundRect with radius 5, cut 2 the same as radius 3.
   for (uint8_t i = 0; i < cut; i++) {
     uint8_t inset = cut - i;
-    arduboy.drawFastVLine(x+i, y+inset, h-2*inset, color);
-    arduboy.drawFastVLine(x+w-1-i, y+inset, h-2*inset, color);
+    fillRect(x+i, y+inset, 1, h-2*inset, color);
+    fillRect(x+w-1-i, y+inset, 1, h-2*inset, color);
   }
-  arduboy.fillRect(x+cut, y, w-2*cut, h, color);
+  fillRect(x+cut, y, w-2*cut, h, color);
 }
 
 void AWGame::drawCursor(int16_t x, int16_t y, uint8_t frame){
   // The 32x32 cursor from its pieces. Frame 1 spreads them 2 pixels further out.
   int8_t spread = frame ? 2 : 0;
-  FX::drawBitmap(x+4-spread, y+4-spread, cursorCorners_plus_mask, 0, dbmMasked);
-  FX::drawBitmap(x+20+spread, y+4-spread, cursorCorners_plus_mask, 1, dbmMasked);
-  FX::drawBitmap(x+4-spread, y+20+spread, cursorCorners_plus_mask, 2, dbmMasked);
-  FX::drawBitmap(x+22+spread, y+22+spread, cursorHand_plus_mask, frame, dbmMasked);
+  drawFX(x+4-spread, y+4-spread, 8, 8, cursorCorners_plus_mask, 0, SpritesU::MODE_PLUSMASKFX);
+  drawFX(x+20+spread, y+4-spread, 8, 8, cursorCorners_plus_mask, 1, SpritesU::MODE_PLUSMASKFX);
+  drawFX(x+4-spread, y+20+spread, 8, 8, cursorCorners_plus_mask, 2, SpritesU::MODE_PLUSMASKFX);
+  drawFX(x+22+spread, y+22+spread, 9, 16, cursorHand_plus_mask, frame, SpritesU::MODE_PLUSMASKFX);
 }
 
 void AWGame::printAt(int16_t x, int16_t y, char_P *text){
@@ -2321,27 +2452,33 @@ void AWGame::printChar(char c){
   // Two letters share 4 bytes, one byte per column: the even letter sits
   // in the low 4 bits, the odd one in the high 4 bits.
   // Same pixels as Tinyfont, only it must not print off the screen.
+  // Grayscale draws every text 3 times per picture, so this is kept quick:
+  // 8 bit numbers, and a multiply moves the bits down faster than a shift.
   uint8_t index = c - 32;
-  int16_t y = printY;
+  uint8_t y = printY; // texts are always on the screen
   if ((index >= 65 && index <= 90) || index == 12 || index == 27) y++; // lowercase and commas sit lower
   const uint8_t *letter = TINYFONT_SPRITE + (index/2)*4;
+  bool highBits = c & 1;
 
   // The screen buffer holds rows of 8 pixels, one byte per column.
   // A letter that starts low in a row reaches into the next row.
   uint8_t *column = arduboy.getBuffer() + printX + (y/8)*WIDTH;
   uint8_t shift = y % 8;
+  uint8_t factor = 1 << shift;
+  bool twoRows = shift > 4;
   for (uint8_t i = 0; i < 4; i++) {
     uint8_t bits = pgm_read_byte(letter+i);
-    bits = (c % 2) ? bits >> 4 : bits & 0x0f;
-    uint16_t pixels = bits << shift;
+    bits = highBits ? bits >> 4 : bits & 0x0f;
+    uint16_t pixels = bits * factor;
     if (textColor) {
-      column[i] |= pixels;
-      if (shift > 4) column[i+WIDTH] |= pixels >> 8;
+      column[0] |= pixels;
+      if (twoRows) column[WIDTH] |= pixels >> 8;
     }
     else {
-      column[i] &= ~pixels;
-      if (shift > 4) column[i+WIDTH] &= ~(pixels >> 8);
+      column[0] &= ~pixels;
+      if (twoRows) column[WIDTH] &= ~(pixels >> 8);
     }
+    column++;
   }
   printX += 5;
 }

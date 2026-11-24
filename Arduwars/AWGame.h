@@ -1,9 +1,20 @@
 #ifndef GAME_H
 #define GAME_H
 
-#include <Arduboy2.h>
+// Grayscale: ArduboyG shows black, white and 2 grays by sending 3 layers
+// per picture. ArduboyG.h and SpritesU.hpp come unchanged from
+// tiberiusbrown/ArduGray_Demo, commit c198193 (MIT, see ArduboyG-LICENSE.txt).
+// Timer 1 runs the screen, the sound player keeps timers 3 and 4.
+// The bottom row of the screen stays black: the screen rests there between layers.
+#define ABG_TIMER1
+#define ABG_SYNC_PARK_ROW
+#include "ArduboyG.h"
 #include <Tinyfont.h>
-#include <ArduboyFX.h> // draws the art and reads the maps from the FX chip
+#include <ArduboyFX.h> // reads the art and the maps from the FX chip
+// SpritesU draws the art from the FX chip, about twice as fast as FX::drawBitmap.
+#define SPRITESU_FX
+#define SPRITESU_RECT
+#include "SpritesU.hpp"
 #include "List.h"
 
 #include "DataClasses.h"
@@ -138,6 +149,7 @@ private:
 
     // Game Helper
     void drawMapAtPosition(Point pos); // Draws the map at the given position
+    void drawFog(int16_t x, int16_t y); // Darkens the tile at x, y on the screen with fog
 
     // Shows a dialog with a text at the center of the Screen.
     // closes if B is pressed
@@ -281,10 +293,48 @@ private:
 
     // ======================
     // Data
-    // This is our instance of the Arduboy2Base class. It is the foundation for
-    // every Arduboy project. We use Arduboy2Base instead of Arduboy2 since we
-    // wont use the print functions.
-    Arduboy2Base arduboy;
+    // This is our instance of the Arduboy2Base class, with ArduboyG on top
+    // for grayscale. It is the foundation for every Arduboy project.
+    // We use the Base version since we wont use the print functions.
+    ArduboyGBase_Config<ABG_Mode::L4_Triplane> arduboy;
+
+    // Grayscale: every picture is drawn 3 times, once per layer, and the game
+    // thinks once per picture. Every loop that shows something does:
+    //   draw; showPlane(); if (!newPicture()) continue; then think and read buttons.
+    // showPlane sends the layer to the screen, the buffer comes back empty.
+    void showPlane();
+    // True once per picture: counts frameCount up and reads the buttons.
+    bool newPicture();
+    // The screen goes dark while no layer comes. Before long thinking
+    // (the AI) this keeps the last layer on the screen.
+    void holdScreen();
+
+    // What a box or the screen wipe draws behind itself, each layer anew.
+    static constexpr uint8_t SceneBlack = 0;
+    static constexpr uint8_t SceneTitle = 1;
+    static constexpr uint8_t SceneMap = 2;   // map at cameraPosition, cursor, top bar of viewingPlayer
+    uint8_t scene = SceneBlack;
+    static constexpr int16_t NoCursor = -1000;
+    Point sceneCursor = {NoCursor, 0};       // where the map scene draws the cursor on screen
+    void drawScene();
+    void drawSceneTop();                     // the cursor and the top bar
+    // The title menu, kept here so the screen wipe can draw it too.
+    char_P * const *titleItems;
+    uint8_t titleCount;
+    int8_t titleCursor;
+    void drawTitle();
+    // Draws the scene for some pictures, for timed effects.
+    void showScene(uint8_t pictures);
+
+    // Draws a picture from the FX chip. The FX data tool puts 4 bytes of
+    // size in front of the pixels, so the size comes from the caller.
+    // Modes: SpritesU::MODE_SELFMASKFX (white pixels only), MODE_OVERWRITEFX,
+    // MODE_PLUSMASKFX (picture with mask).
+    static void drawFX(int16_t x, int16_t y, uint8_t w, uint8_t h, uint24_t image, uint16_t frame, uint8_t mode){
+      SpritesU::drawBasic(x, y, w, h, image + 4, frame, mode);
+    }
+    // A filled rectangle in BLACK, DARK_GRAY, LIGHT_GRAY or WHITE.
+    void fillRect(int16_t x, int16_t y, uint8_t w, uint8_t h, uint8_t color);
 
     // Text uses the small 4x4 letters of the Tinyfont library, drawn by our
     // own printChar. They are much smaller than Arduboy2's font so more fits

@@ -5,7 +5,9 @@
 // per 8-row page, one byte per column, top pixel in bit 0. Names ending in
 // _plus_mask, units*, mapFOG_16x16 and selectionAnimation hold a mask byte after
 // each picture byte: draw those with dbmMasked.
-// Draw with FX::drawBitmap(x, y, name, frame, mode).
+// Draw with drawFX(x, y, width, height, name, frame, mode) in AWGame.
+// 4-shade pictures (made by tools/graysprite.py) hold 3 frames per picture,
+// one per gray layer: draw frame*3 + arduboy.currentPlane().
 // Kept for later: waterAnimation, not drawn yet.
 
 uint16_t worldSprite = 16, 16
@@ -205,6 +207,9 @@ uint8_t
 include "units.txt"
 
 include "pinup.txt"
+
+// Grayscale test picture, 4 shades. Hold A on the title to see it. Todo 3 removes it.
+include "graytest.txt"
 
 // The maps.
 // You can create your custom maps with tiled:The Map editor https://www.mapeditor.org/
