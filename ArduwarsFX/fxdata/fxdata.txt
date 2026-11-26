@@ -1,0 +1,9 @@
+// Everything on the FX chip. ../../run.sh makes fxdata.bin and fxdata.h from it with tools/fxdata-build.py.
+// Pictures from tools/graysprite.py: 4 size bytes, then 3 frames per picture (one per gray layer),
+// a mask byte after each picture byte. Draw with MODE_PLUSMASKFX, frame*3 + currentPlane().
+// All files here except this one are made by run.sh. Do not edit them.
+include "maps.txt"       // tools/mapconv.py: the maps, mapBlocks (baked map pictures, no mask) and mapTops
+include "cursor.txt"     // 48x24
+include "marks.txt"      // owner marks, 8x8: player 1, player 2
+include "unitsA.txt"     // player 1 units, 24x24, 16 kinds
+include "unitsB.txt"     // player 2 units
