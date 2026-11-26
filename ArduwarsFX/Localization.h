@@ -9,3 +9,5 @@ char_P LOCA_unitsLeft[] PROGMEM = " LEFT";   // after the number of units that c
 char_P LOCA_wait[] PROGMEM      = "WAIT";
 char_P LOCA_cancel[] PROGMEM    = "CANCEL";
 char_P LOCA_cursor[] PROGMEM    = ">";
+char_P LOCA_attack[] PROGMEM    = "ATTACK";
+char_P LOCA_fortify[] PROGMEM   = "FORTIFY";

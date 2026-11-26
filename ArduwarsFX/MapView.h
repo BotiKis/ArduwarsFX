@@ -37,6 +37,15 @@ bool walking;
 uint8_t walkSide, walkUnit, walkC, walkR;   // walkC, walkR: the tile it walks into
 int16_t walkX, walkY;                       // its picture on the map picture
 
+// A fight: the cursor shows on both tiles while fightOn. A unit hidden while it flickers out.
+bool fightOn;
+uint8_t fightC[2], fightR[2];
+uint8_t hideSide = 255, hideUnit;
+
+// In Turn.h: the letters, for the health number.
+extern int16_t printX, printY;
+static void printChar(char c);
+
 // In Rules.h: the move range and the movement arrow, drawn under the units.
 extern bool rangeOn, arrowOn;
 AW_FAST static void drawRange(uint8_t plane, uint8_t phase);
@@ -46,11 +55,12 @@ AW_FAST static void drawArrow(uint8_t plane, uint8_t phase);
 uint16_t blocks[2][3];
 uint8_t blockC, blockR;   // first block column and row on screen
 
-enum class AWPic : uint8_t { Top, Cursor, UnitA, UnitB, UnitADone, UnitBDone, Mark };
+enum class AWPic : uint8_t { Top, Cursor, Mark, UnitA, UnitB, UnitADone, UnitBDone };
+constexpr uint8_t PicFortified = 0x80;   // added to a unit's pic: sandbags at its feet
 struct AWDrawItem {
   uint8_t key;            // draw order: diagonal c+r times 4, then top 0, mark 1, cursor 2, unit 3
   AWPic pic;
-  uint8_t frame;
+  uint8_t frame;          // units: kind + 16 * health
   int16_t x, y;           // on the map picture
 };
 // The draw list: first the units' part (units, owner marks, tops in front of units), made for the screen
@@ -193,12 +203,13 @@ AW_FAST static void prepareList() {
   for (uint8_t side = 0; side < 2; side++)
     for (uint8_t i = 0; i < match.unitCount[side]; i++) {
       AWUnit &u = match.units[side][i];
-      if (walking && side == walkSide && i == walkUnit) continue;
+      if ((walking && side == walkSide && i == walkUnit) || (side == hideSide && i == hideUnit)) continue;
       int8_t c = u.c, r = u.r;
       if (c + r < sLo || c + r > sHi || c - r < dLo || c - r > dHi) continue;
       // unit bottom 6 pixels below the diamond center
       uint8_t before = drawCount;
-      addDrawItem((c + r) * 4 + 3, AWPic(uint8_t(AWPic::UnitA) + side + 2 * u.moved), u.kind, tileX(c, r) + 12, tileY(c, r) + 10);
+      addDrawItem((c + r) * 4 + 3, AWPic(uint8_t(AWPic::UnitA) + side + 2 * u.moved + (u.fortified ? PicFortified : 0)),
+                  u.kind | u.health << 4, tileX(c, r) + 12, tileY(c, r) + 10);
       if (drawCount == before) continue;
       if (standCount < MaxStanding) { standC[standCount] = c; standR[standCount++] = r; }
       addFront(c + 1, r);
@@ -252,9 +263,13 @@ AW_FAST static void prepareCursor() {
   drawLimit = MaxDrawItems;
   if (walking) {
     AWUnit &u = match.units[walkSide][walkUnit];
-    addDrawItem((walkC + walkR) * 4 + 3, AWPic(uint8_t(AWPic::UnitA) + walkSide), u.kind, walkX, walkY);
+    addDrawItem((walkC + walkR) * 4 + 3, AWPic(uint8_t(AWPic::UnitA) + walkSide), u.kind | u.health << 4, walkX, walkY);
     addFronts(walkC, walkR);
     addFronts(u.c, u.r);
+  }
+  for (uint8_t i = 0; fightOn && i < 2; i++) {
+    addDrawItem((fightC[i] + fightR[i]) * 4 + 2, AWPic::Cursor, 0, tileX(fightC[i], fightR[i]), tileY(fightC[i], fightR[i]) + 16);
+    addFronts(fightC[i], fightR[i]);
   }
   if (!cursorOn || !cursorShown) return;
   uint8_t c = cursorC, r = cursorR;
@@ -293,7 +308,8 @@ static void drawMap() {
     AWDrawItem &d = drawItems[drawOrder[i]];
     int16_t x = d.x - camX, y = d.y - camY;
     if (x <= -48 || x >= WIDTH || y <= -48 || y >= HEIGHT) continue;
-    switch (d.pic) {
+    uint8_t pic = uint8_t(d.pic), kind = d.frame & 15;
+    switch (AWPic(pic & ~PicFortified)) {
       case AWPic::Top: {
         AWTop t;
         memcpy_P(&t, &mapTopTable[d.frame], sizeof(t));
@@ -301,12 +317,26 @@ static void drawMap() {
         break;
       }
       case AWPic::Cursor: drawFX(x, y, 48, 24, cursor, d.frame, plane); break;
-      case AWPic::UnitA:  drawFX(x, y, 24, 24, unitsA, d.frame, plane); break;
-      case AWPic::UnitB:  drawFX(x, y, 24, 24, unitsB, d.frame, plane); break;
-      case AWPic::UnitADone: drawFX(x, y, 24, 24, unitsADone, d.frame, plane); break;
-      case AWPic::UnitBDone: drawFX(x, y, 24, 24, unitsBDone, d.frame, plane); break;
+      case AWPic::UnitA:  drawFX(x, y, 24, 24, unitsA, kind, plane); break;
+      case AWPic::UnitB:  drawFX(x, y, 24, 24, unitsB, kind, plane); break;
+      case AWPic::UnitADone: drawFX(x, y, 24, 24, unitsADone, kind, plane); break;
+      case AWPic::UnitBDone: drawFX(x, y, 24, 24, unitsBDone, kind, plane); break;
       case AWPic::Mark:   drawFX(x, y, 8, 8, marks, d.frame, plane); break;
     }
+    if (pic & PicFortified) drawFX(x, y + 15, 24, 8, sandbags, 0, plane);
+  }
+  // A hurt unit shows its health at its bottom right, over everything, so a unit in front can not
+  // hide it. Only where the number fits on screen: the letters do not clip.
+  for (uint8_t i = 0; i < drawCount; i++) {
+    AWDrawItem &d = drawItems[i];
+    uint8_t health = d.frame >> 4;
+    int16_t x = d.x - camX, y = d.y - camY;
+    if (d.pic < AWPic::UnitA || health >= 10 || x < -20 || x > WIDTH - 24 || y < -19 || y > HEIGHT - 23) continue;
+    SpritesU::fillRect(x + 18, y + 17, 6, 7, 0);   // black box, white inside, in every layer
+    SpritesU::fillRect(x + 19, y + 18, 5, 6, 1);
+    printX = x + 20;
+    printY = y + 19;
+    printChar('0' + health);
   }
 }
 

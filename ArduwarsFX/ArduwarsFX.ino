@@ -43,8 +43,9 @@ static void drawNumber(uint8_t x, uint16_t n) {
   }
 }
 
-// ponytail: test units for step 1, 16 kinds per side on every other tile of an 8x4 area at each HQ.
-// TestPacked 1: a 4x4 block instead, the busiest view for the draw time. Rules (step 2) replace this.
+// ponytail: test units, 16 kinds per side on every other tile of an 8x4 area. For the fights of step 2c
+// both armies stand face to face at player 1's HQ, player 2's 5 rows further, one free row between.
+// TestPacked 1: a 4x4 block instead, the busiest view for the draw time. The shop (step 2d) replaces this.
 constexpr bool TestPacked = 0;
 static void placeTestUnits() {
   for (uint8_t side = 0; side < 2; side++) {
@@ -52,8 +53,8 @@ static void placeTestUnits() {
     for (uint8_t k = 0; k < 16; k++) {
       AWUnit &u = match.units[side][k];
       uint8_t c = TestPacked ? (k & 3) : (k & 3) * 2 + ((k >> 2) & 1), r = k >> 2;
-      u.c = constrain(hqC[side] - 3 + c, 0, mapW - 1);
-      u.r = constrain(hqR[side] - 1 + r, 0, mapH - 1);
+      u.c = constrain(hqC[0] - 3 + c, 0, mapW - 1);
+      u.r = constrain(hqR[0] - 1 + side * 5 + r, 0, mapH - 1);
       u.kind = k;
       u.health = 10;
     }
@@ -96,7 +97,7 @@ void setup() {
   placeTestUnits();
   match.day = 1;
   for (uint8_t side = 0; side < 2; side++) {
-    centerOn(hqC[side], hqR[side]);
+    centerOn(hqC[0], hqR[0] + side * 5);
     match.viewX[side] = camX;
     match.viewY[side] = camY;
   }

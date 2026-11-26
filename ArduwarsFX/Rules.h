@@ -14,6 +14,72 @@ static uint8_t terrainBits(uint8_t kind) {
   return kind < 3 ? 0b1100111 : kind < 10 ? 0b1100011 : kind < 13 ? 0b1111111 : 0b0011000;
 }
 
+// ---- Combat, numbers from the old game ----
+
+// Per kind: attack (damage to a full health Soldier on plains), reach (attack range in grid steps),
+// defense (taken off every hit).
+const uint8_t unitStats[16][3] PROGMEM = {
+  {2,1,0}, {5,1,0}, {6,1,0},
+  {5,1,1}, {2,1,1}, {7,1,2}, {11,1,3}, {6,3,1}, {9,4,1}, {8,4,0},
+  {6,1,1}, {9,1,2}, {11,1,3},
+  {8,1,1}, {9,4,3}, {0,0,1},
+};
+static uint8_t unitStat(uint8_t kind, uint8_t i) { return pgm_read_byte(&unitStats[kind][i]); }
+static uint8_t unitReach(uint8_t kind) { return unitStat(kind, 1); }
+
+// Who can hit whom: per attacker, one bit per defender, kind 0 in the top bit.
+const uint16_t attackTable[16] PROGMEM = {
+  0b1111111111100111, 0b1111111111100111, 0b1111111111000111,
+  0b1111111111000111, 0b1111111111000111, 0b1111111111000111, 0b1111111111000111,
+  0b1111111111000111, 0b0000000000111111, 0b1111111111000111,
+  0b1111111111111111, 0b0000000000111000, 0b1111111111111111,
+  0b0000000000111111, 0b1111111111111111, 0b0000000000000000,
+};
+
+constexpr uint8_t FullHealth = 10;
+constexpr uint8_t FortifyBonus = 2;   // extra defense behind sandbags, the same as a hill
+
+// Cover on tile (c, r) for ground units and ships: HQ 3, other buildings 2, mountain 3, hill 2, forest 1.
+static uint8_t coverAt(uint8_t c, uint8_t r) {
+  FX::seekData(mapFirstBuilding + c + r);
+  uint8_t i = FX::readEnd();
+  FX::seekData(mapBuildings + i * 7);
+  for (; i < buildingCount; i++) {
+    uint8_t bc = FX::readPendingUInt8(), br = FX::readPendingUInt8(), kind = FX::readPendingUInt8() & 15;
+    fxRead16();
+    fxRead16();
+    if (bc + br > c + r) break;
+    if (bc == c && br == r) { FX::readEnd(); return kind ? 2 : 3; }
+  }
+  FX::readEnd();
+  FX::seekData(mapGrid + r * mapW + c);
+  uint8_t terrain = FX::readEnd() & 15;
+  return terrain == 1 ? 1 : terrain == 6 ? 2 : terrain == 2 ? 3 : 0;
+}
+
+// The planned damage of `a` on `d`: attack scaled by health (rounded up), minus defense, cover and
+// Fortify, at least 1. 0 when `a` can not hit `d`. Planes get no cover.
+static uint8_t damage(const AWUnit &a, const AWUnit &d) {
+  if (!(pgm_read_word(&attackTable[a.kind]) & (0x8000 >> d.kind))) return 0;
+  uint8_t hit = (unitStat(a.kind, 0) * a.health + FullHealth - 1) / FullHealth;
+  uint8_t block = unitStat(d.kind, 2) + (d.fortified ? FortifyBonus : 0);
+  if (d.kind < 10 || d.kind > 12) block += coverAt(d.c, d.r);
+  return hit > block ? hit - block : 1;
+}
+
+// A real hit: 1 less (1 in 4), as planned (2 in 4) or 1 more (1 in 4), never below 1.
+// Multiply by 5, add 1: visits all 256 numbers before it repeats. startTurn mixes in the time of a key press.
+uint8_t randomState;
+static uint8_t rollDamage(uint8_t hit) {
+  randomState = randomState * 5 + 1;
+  uint8_t roll = randomState >> 6;
+  if (roll == 0 && hit > 1) hit--;
+  if (roll == 3) hit++;
+  return hit;
+}
+
+static uint8_t distance(const AWUnit &a, const AWUnit &b) { return abs(a.c - b.c) + abs(a.r - b.r); }
+
 // Moves left after leaving a tile with `left` moves: forests and hills cost 1 more,
 // a mountain leaves at most 2, every step costs 1.
 static int8_t leftAfter(uint8_t terrain, int8_t left) {
@@ -32,6 +98,7 @@ int8_t rangeC, rangeR;        // grid tile of window tile (0, 0)
 bool rangeOn;                 // draw the range
 uint8_t selSide, selUnit;     // the selected unit
 uint8_t startC, startR;       // where it stood
+bool startFortified;          // fortified when selected: a walk takes the sandbags, Cancel gives them back
 
 // Grid directions: c+1, r+1, c-1, r-1. On screen: down right, down left, up left, up right.
 const int8_t dirC[4] PROGMEM = { 1, 0, -1, 0 };
@@ -118,6 +185,31 @@ static void floodRange() {
 // The unit may end its move on a reached tile where nobody stands, or where it stood.
 static bool canStop(uint8_t c, uint8_t r) {
   return inRange(c, r) && ((c == startC && r == startR) || !unitOn(c, r));
+}
+
+// Enemy unit i is a target of the selected unit: in reach and it can be hit.
+static bool isTarget(uint8_t i) {
+  AWUnit &u = match.units[selSide][selUnit], &e = match.units[selSide ^ 1][i];
+  return distance(u, e) <= unitReach(u.kind) && damage(u, e);
+}
+
+// Marks the targets in the range bits, on a window around the unit (reach 4 fits). Returns how many.
+// A unit with reach over 1 can not move and attack in the same turn.
+static uint8_t markTargets() {
+  AWUnit &u = match.units[selSide][selUnit];
+  rangeC = int8_t(u.c) - RangeHalf;
+  rangeR = int8_t(u.r) - RangeHalf;
+  memset(rangeBits, 0, sizeof(rangeBits));
+  if (unitReach(u.kind) > 1 && (u.c != startC || u.r != startR)) return 0;
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < match.unitCount[selSide ^ 1]; i++) {
+    if (!isTarget(i)) continue;
+    AWUnit &e = match.units[selSide ^ 1][i];
+    uint16_t t = uint8_t(e.r - rangeR) * RangeSize + uint8_t(e.c - rangeC);
+    rangeBits[t / 8] |= 1 << (t & 7);
+    n++;
+  }
+  return n;
 }
 
 // The path to tile (c, r), walked back along "came from". No arrow when the unit can not stop there.

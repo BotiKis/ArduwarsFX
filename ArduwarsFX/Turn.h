@@ -119,6 +119,7 @@ static void startTurn() {
   sceneBlack = true;
   char_P *name = match.side ? LOCA_player2 : LOCA_player1;
   showBox(&name, 1, true);
+  randomState += pictureCount;   // the damage roll depends on when B was pressed
   camX = match.viewX[match.side];
   camY = match.viewY[match.side];
   mapChanged = true;
@@ -174,30 +175,170 @@ static void walkPath() {
     updateMapView();
   }
   walking = false;
+  u.fortified = 0;   // walking leaves the sandbags behind
   mapChanged = true;
   centerOn(u.c, u.r);
   updateMapView();
 }
 
-static void unitMenu() {
-  static char_P * const options[2] = { LOCA_wait, LOCA_cancel };
-  rangeOn = arrowOn = cursorShown = false;
-  prepareCursor();
-  AWUnit &u = match.units[selSide][selUnit];
-  if (showBox(options, 2, false) == 0) {
-    u.moved = 1;
-    mapChanged = true;
-    dropSelection();
-    return;
+// ---- Fights ----
+
+// Pictures of the map for an effect: draw, send, n pictures.
+static void showPictures(uint8_t n) {
+  while (n) {
+    drawMap();
+    if (sendLayer()) n--;
   }
-  // Cancel: back to where it stood, still selected.
-  u.c = startC;
-  u.r = startR;
-  mapChanged = true;
-  centerOn(startC, startR);
+}
+
+// A hit: the screen turns inverted for 4 pictures, then back for 4.
+static void flash(uint8_t times) {
+  while (times--)
+    for (uint8_t on = 2; on-- > 0;) {
+      FX::enableOLED();   // invert talks to the screen
+      arduboy.invert(on);
+      FX::disableOLED();
+      showPictures(4);
+    }
+}
+
+// The camera glides a quarter of the way to tile (c, r) each picture.
+static void glideTo(uint8_t c, uint8_t r) {
+  int16_t x = camX, y = camY;
+  centerOn(c, r);
+  int16_t dx = camX - x, dy = camY - y;
+  camX = abs(dx) < 4 ? camX : x + dx / 4;
+  camY = abs(dy) < 4 ? camY : y + dy / 4;
   updateMapView();
+}
+
+// Unit i of a side flickers for about a second, then it leaves the map.
+static void destroyUnit(uint8_t side, uint8_t i) {
+  for (uint8_t f = 0; f < 60;) {
+    drawMap();
+    if (!sendLayer()) continue;
+    if (f++ % 10) continue;
+    hideSide = (f / 10) % 2 ? 255 : side;
+    hideUnit = i;
+    mapChanged = true;
+    updateMapView();
+  }
+  hideSide = 255;
+  match.units[side][i] = match.units[side][--match.unitCount[side]];
+  mapChanged = true;
+  updateMapView();
+}
+
+// The selected unit attacks enemy unit t. The cursor blinks on both for about a second, then the hit.
+// Units with reach 1 next to each other: a defender that lives hits back.
+// ponytail: a side without units goes on playing. The end of the match comes in step 2d.
+static void fight(uint8_t t) {
+  uint8_t enemy = selSide ^ 1;
+  AWUnit &a = match.units[selSide][selUnit], &d = match.units[enemy][t];
+  a.moved = 1;
+  rangeOn = cursorShown = false;
+  fightC[0] = d.c; fightR[0] = d.r;
+  fightC[1] = a.c; fightR[1] = a.r;
+  mapChanged = true;
+  updateMapView();
+  for (uint8_t f = 0; f < 60;) {
+    drawMap();
+    if (!sendLayer()) continue;
+    if (f++ % 10) continue;
+    fightOn = (f / 10) % 2 == 0;
+    prepareCursor();
+  }
+  fightOn = false;
+  prepareCursor();
+  flash(3);
+  uint8_t hit = rollDamage(damage(a, d));
+  if (hit >= d.health) { destroyUnit(enemy, t); return; }
+  d.health -= hit;
+  mapChanged = true;
+  updateMapView();
+  if (distance(a, d) != 1 || unitReach(a.kind) > 1 || unitReach(d.kind) > 1) return;
+  hit = damage(d, a);
+  if (!hit) return;
+  hit = rollDamage(hit);
+  flash(2);
+  if (hit >= a.health) { destroyUnit(selSide, selUnit); return; }
+  a.health -= hit;
+  mapChanged = true;
+  updateMapView();
+}
+
+// The next target from enemy unit `from` in direction dir (1 or -1), round the list.
+static uint8_t nextTarget(uint8_t from, int8_t dir) {
+  uint8_t n = match.unitCount[selSide ^ 1];
+  for (uint8_t k = 0; k < n; k++) {
+    from = (from + n + dir) % n;
+    if (isTarget(from)) return from;
+  }
+  return from;
+}
+
+// The targets show like the move range, the camera glides to the chosen one. The D-pad steps through
+// them (right and down forward, left and up back), B attacks, A goes back to the menu (returns false).
+static bool chooseTarget() {
+  uint8_t t = nextTarget(match.unitCount[selSide ^ 1] - 1, 1);
   rangeOn = cursorShown = true;
   prepareCursor();
+  while (true) {
+    drawMap();
+    if (!sendLayer()) continue;
+    AWUnit &e = match.units[selSide ^ 1][t];
+    glideTo(e.c, e.r);
+    if (arduboy.justPressed(B_BUTTON)) { fight(t); return true; }
+    if (arduboy.justPressed(A_BUTTON)) {
+      AWUnit &u = match.units[selSide][selUnit];
+      centerOn(u.c, u.r);
+      updateMapView();
+      return false;
+    }
+    if (arduboy.justPressed(RIGHT_BUTTON | DOWN_BUTTON)) t = nextTarget(t, 1);
+    if (arduboy.justPressed(LEFT_BUTTON | UP_BUTTON)) t = nextTarget(t, -1);
+  }
+}
+
+// After the walk (or staying): ATTACK when a target is in reach, WAIT (FORTIFY for a land unit that
+// stayed and has no sandbags yet), CANCEL. A works as CANCEL.
+static void unitMenu() {
+  AWUnit &u = match.units[selSide][selUnit];
+  bool canFortify = u.c == startC && u.r == startR && u.kind < 10 && !u.fortified;
+  while (true) {
+    rangeOn = arrowOn = cursorShown = false;
+    prepareCursor();
+    char_P *options[3];
+    uint8_t n = 0;
+    bool canAttack = markTargets();
+    if (canAttack) options[n++] = LOCA_attack;
+    options[n++] = canFortify ? LOCA_fortify : LOCA_wait;
+    options[n++] = LOCA_cancel;
+    int8_t chosen = showBox(options, n, false);
+    if (chosen < 0) chosen = n - 1;
+    if (canAttack && chosen == 0) {
+      if (chooseTarget()) break;
+      continue;
+    }
+    if (chosen == n - 1) {
+      // Cancel: back to where it stood, still selected.
+      u.c = startC;
+      u.r = startR;
+      u.fortified = startFortified;
+      mapChanged = true;
+      centerOn(startC, startR);
+      updateMapView();
+      floodRange();   // the targets took the range bits
+      cursorShown = true;
+      prepareCursor();
+      return;
+    }
+    u.moved = 1;
+    u.fortified |= canFortify;
+    break;
+  }
+  mapChanged = true;
+  dropSelection();
 }
 
 static void endTurnMenu() {
@@ -236,6 +377,7 @@ static void updateTurn() {
       if (u.c != cursorC || u.r != cursorR || u.moved) continue;
       selSide = match.side;
       selUnit = i;
+      startFortified = u.fortified;
       floodRange();
       turn = AWTurn::Selected;
       arrowOn = false;
