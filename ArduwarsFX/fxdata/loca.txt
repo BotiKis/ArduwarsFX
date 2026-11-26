@@ -1,0 +1,48 @@
+// All text on screen, on the FX chip. Hand-written, like fxdata.txt. One text per line.
+// Letters: Tinyfont's 4x4 capitals, digits and a few signs.
+// In the code: printAt(x, y, LOCA_name), dialog(LOCA_name) or an option of showBox.
+LOCA_player1     = string 'PLAYER 1'
+LOCA_player2     = string 'PLAYER 2'
+LOCA_p1Wins      = string 'PLAYER 1 WINS'
+LOCA_p2Wins      = string 'PLAYER 2 WINS'
+LOCA_draw        = string 'DRAW'
+
+// End turn box. The number of units that can still act stands in front of LEFT.
+LOCA_unitsLeft   = string ' LEFT'
+LOCA_endTurn     = string 'END TURN'
+LOCA_cancel      = string 'CANCEL'
+
+// Unit menu
+LOCA_attack      = string 'ATTACK'
+LOCA_capture     = string 'CAPTURE'
+LOCA_wait        = string 'WAIT'
+LOCA_fortify     = string 'FORTIFY'
+LOCA_captured    = string 'CAPTURED'
+LOCA_ambush      = string 'AMBUSH'
+
+// Top bar and shop
+LOCA_p1          = string 'P1'
+LOCA_p2          = string 'P2'
+LOCA_day         = string 'DAY:'
+LOCA_money       = string 'M:'
+LOCA_hundreds    = string '00'
+LOCA_attackShort = string 'ATK'
+LOCA_speed       = string 'SPEED'
+
+// Unit names, game order. The shop reads a list from its first name on, one name after the other:
+// keep the order and nothing between the names. Workshop from SOLDIER, airport from HELI, shipyard from CRUISER.
+LOCA_unitNames   = string 'SOLDIER'
+string 'MECH'
+string 'SPECOPS'
+string 'SCOUT'
+string 'ASSIST'
+string 'TANK'
+string 'BIGTANK'
+string 'ARTILLERY'
+string 'ROCKET'
+string 'MISSILES'
+LOCA_planeNames  = string 'HELI'
+string 'FIGHTER'
+string 'BOMBER'
+LOCA_shipNames   = string 'CRUISER'
+string 'BATTLESHIP'

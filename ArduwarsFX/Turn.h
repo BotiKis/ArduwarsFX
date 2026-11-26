@@ -8,7 +8,6 @@
 // Boxes, the walk and the wipe run their own loops: draw a layer, send it, think once per picture.
 #include <Tinyfont.h>         // only for the library: the letters come from TinyfontSprite.c
 #include <TinyfontSprite.c>
-#include "Localization.h"
 
 enum class AWTurn : uint8_t { Free, Selected };
 AWTurn turn = AWTurn::Free;
@@ -20,13 +19,13 @@ int16_t printX, printY;
 
 // One Tinyfont letter at printX, printY in black, then printX moves on. Two letters share 4 bytes,
 // one byte per column: the even letter in the low 4 bits, the odd one in the high 4 bits.
-static void printChar(char c) {
+AW_FAST static void printChar(char c) {
   const uint8_t *letter = TINYFONT_SPRITE + ((c - 32) / 2) * 4;
   uint8_t *column = arduboy.getBuffer() + printX + (printY / 8) * WIDTH;
-  uint8_t shift = printY % 8;
+  uint8_t shift = printY % 8, down = pgm_read_byte(bitOf + shift);   // multiply instead of shifting: faster
   for (uint8_t i = 0; i < 4; i++) {
     uint8_t bits = pgm_read_byte(letter + i);
-    uint16_t pixels = uint16_t(c & 1 ? bits >> 4 : bits & 15) << shift;
+    uint16_t pixels = uint8_t(c & 1 ? bits >> 4 : bits & 15) * down;
     column[0] &= ~pixels;
     if (shift > 4) column[WIDTH] &= ~(pixels >> 8);
     column++;
@@ -34,25 +33,66 @@ static void printChar(char c) {
   printX += 5;
 }
 
-static void printAt(int16_t x, int16_t y, char_P *text) {
+// The health badge of a hurt unit at screen x, y: a black box of 6x7, its inside of 5x6 at the bottom
+// right white, the digit in black. Straight into the buffer, the same in every layer.
+// It may hang 2 pixels off the left or top edge and 1 off the bottom.
+AW_FAST static void drawBadge(int16_t x, int16_t y, uint8_t health) {
+  char c = '0' + health;
+  const uint8_t *letter = TINYFONT_SPRITE + ((c - 32) / 2) * 4;
+  uint8_t top = y < 0 ? 0 : y, cut = top - y, down = pgm_read_byte(bitOf + (top & 7));
+  uint8_t *b = arduboy.getBuffer() + (top >> 3) * WIDTH + x;
+  uint16_t clear = uint8_t(0x7f >> cut) * down;
+  for (uint8_t i = 0; i < 6; i++, b++) {
+    if (x + i < 0) continue;
+    uint8_t white = i ? 0x7e : 0;   // column 0 is all black, the others are white below row 0
+    if (i >= 2) {
+      uint8_t bits = pgm_read_byte(letter + i - 2);
+      white &= ~((c & 1 ? bits >> 4 : bits & 15) << 2);
+    }
+    uint16_t set = uint8_t(white >> cut) * down;
+    b[0] = (b[0] & ~uint8_t(clear)) | uint8_t(set);
+    if (top < HEIGHT - 8) b[WIDTH] = (b[WIDTH] & ~uint8_t(clear >> 8)) | uint8_t(set >> 8);
+  }
+}
+
+// A text from the FX chip (fxdata/loca.txt) at x, y.
+static void printAt(int16_t x, int16_t y, uint24_t text) {
   printX = x;
   printY = y;
+  FX::seekData(text);
   char c;
-  while ((c = pgm_read_byte(text++)) != 0) printChar(c);
+  while ((c = FX::readPendingUInt8()) != 0) printChar(c);
+  FX::readEnd();
+}
+
+static uint8_t textLength(uint24_t text) {
+  FX::seekData(text);
+  uint8_t n = 0;
+  while (FX::readPendingUInt8()) n++;
+  FX::readEnd();
+  return n;
+}
+
+// The digits of n into p, at least `digits` of them. Returns the place after the last one.
+static char *copyNumber(char *p, uint16_t n, uint8_t digits = 1) {
+  char d[5];
+  uint8_t i = 0;
+  do { d[i++] = '0' + n % 10; n /= 10; } while (n || i < digits);
+  while (i) *p++ = d[--i];
+  return p;
 }
 
 static void printNumber(int16_t x, int16_t y, uint16_t n) {
   printX = x;
   printY = y;
   char digits[5];
-  uint8_t i = 0;
-  do { digits[i++] = '0' + n % 10; n /= 10; } while (n);
-  while (i) printChar(digits[--i]);
+  char *end = copyNumber(digits, n);
+  for (char *p = digits; p < end; p++) printChar(*p);
 }
 
 // A box with rounded corners in a shade (BLACK to WHITE), as in the old game.
 static void fillBox(int16_t x, int16_t y, uint8_t w, uint8_t h, uint8_t shade) {
-  uint8_t lit = shade > arduboy.currentPlane();
+  uint8_t lit = shade >> arduboy.currentPlane() & 1;
   for (uint8_t i = 0; i < 3; i++) {
     uint8_t inset = 3 - i;
     SpritesU::fillRect(x + i, y + inset, 1, h - 2 * inset, lit);
@@ -68,8 +108,8 @@ static void drawScene() {
 
 // A dialog (one line in the middle, B closes it) or a list of options at the top right with a cursor.
 // Returns the chosen option, -1 when A closed the list. `number` goes in front of the first option.
-static int8_t showBox(char_P * const options[], uint8_t count, bool isDialog, uint8_t number = 0) {
-  uint8_t w = isDialog ? strlen_P(options[0]) * 5 + 8 : 54, h = isDialog ? 16 : 6 + count * 7;
+static int8_t showBox(const uint24_t options[], uint8_t count, bool isDialog, uint8_t number = 0) {
+  uint8_t w = isDialog ? textLength(options[0]) * 5 + 8 : 54, h = isDialog ? 16 : 6 + count * 7;
   uint8_t x = isDialog ? (WIDTH - w) / 2 : WIDTH - w - 4, y = isDialog ? 24 : 10;
   uint8_t textX = x + (isDialog ? 4 : 9), textY = y + (isDialog ? 6 : 4);
   int8_t chosen = 0;
@@ -82,7 +122,7 @@ static int8_t showBox(char_P * const options[], uint8_t count, bool isDialog, ui
       if (i == 0 && number) { printNumber(tx, textY, number); tx = printX; }
       printAt(tx, textY + 7 * i, options[i]);
     }
-    if (!isDialog) printAt(x + 4, textY + 7 * chosen, LOCA_cursor);
+    if (!isDialog) { printX = x + 4; printY = textY + 7 * chosen; printChar('>'); }
     if (!sendLayer()) continue;
     if (arduboy.justPressed(B_BUTTON)) return chosen;
     if (isDialog) continue;
@@ -91,6 +131,9 @@ static int8_t showBox(char_P * const options[], uint8_t count, bool isDialog, ui
     if (arduboy.justPressed(UP_BUTTON)) chosen = chosen ? chosen - 1 : count - 1;
   }
 }
+
+// One line in the middle of the screen, B closes it.
+static void dialog(uint24_t text) { showBox(&text, 1, true); }
 
 // The wipe from the old game: rows of 8 pixels slide sideways, even rows one way, odd rows the other,
 // 6 pixels per picture. Out: the scene slides away to black. In: it slides in from black.
@@ -120,22 +163,16 @@ static uint8_t readyUnits() {
 }
 
 // The top bar over the map, as in Arduwars 1.1: player, day, units that can still act of all units,
-// money right-aligned. Its letters are found once per picture (prepareTopBar, from sendLayer),
+// money right-aligned. Its letters are found when the map changes (prepareTopBar, from updateMapView),
 // each layer only draws them: 5 pixels per letter from x = 1.
 constexpr uint8_t BarLetters = 25;
 char barText[BarLetters];
 
-static char *copyText(char *p, char_P *text) {
+static char *copyText(char *p, uint24_t text) {
+  FX::seekData(text);
   char c;
-  while ((c = pgm_read_byte(text++)) != 0) *p++ = c;
-  return p;
-}
-
-static char *copyNumber(char *p, uint16_t n, uint8_t digits = 1) {
-  char d[5];
-  uint8_t i = 0;
-  do { d[i++] = '0' + n % 10; n /= 10; } while (n || i < digits);
-  while (i) *p++ = d[--i];
+  while ((c = FX::readPendingUInt8()) != 0) *p++ = c;
+  FX::readEnd();
   return p;
 }
 
@@ -155,7 +192,7 @@ static void prepareTopBar() {
 
 // Straight into the top 8 rows of the buffer: rows 0-5 white, row 6 black, row 7 stays map.
 // The letters sit on row 1: a Tinyfont column (4 bits) shifted down by 1.
-static void drawTopBar() {
+AW_FAST static void drawTopBar() {
   uint8_t *b = arduboy.getBuffer();
   for (uint8_t x = 0; x < WIDTH; x++) b[x] = (b[x] & 0x80) | 0x3f;
   for (uint8_t i = 0; i < BarLetters; i++) {
@@ -168,12 +205,6 @@ static void drawTopBar() {
       col[j] &= ~((c & 1 ? bits >> 4 : bits & 15) << 1);
     }
   }
-}
-
-static uint8_t ownUnitOn(uint8_t side, uint8_t c, uint8_t r) {
-  for (uint8_t i = 0; i < match.unitCount[side]; i++)
-    if (match.units[side][i].c == c && match.units[side][i].r == r) return i;
-  return 255;
 }
 
 static void heal(AWUnit &u, uint8_t hp) { u.health = min(u.health + hp, FullHealth); }
@@ -189,7 +220,7 @@ static void upkeep() {
     if (!unitOn(bldC, bldR)) b.capture = fullCapture(bldKind);
     if (b.owner != side + 1) continue;
     if (bldKind == 1) match.money[side] = min(match.money[side] + 20, 999);
-    uint8_t u = ownUnitOn(side, bldC, bldR);
+    uint8_t u = unitAt(side, bldC, bldR);
     if (u == 255) continue;
     uint8_t kind = match.units[side][u].kind;
     if (kind < 10 ? bldKind != 3 && bldKind != 4 : bldKind == (kind < 13 ? 3 : 4)) heal(match.units[side][u], 2);
@@ -203,14 +234,12 @@ static void upkeep() {
 
 static void startTurn() {
   sceneBlack = true;
-  char_P *name = match.side ? LOCA_player2 : LOCA_player1;
-  showBox(&name, 1, true);
+  dialog(match.side ? LOCA_player2 : LOCA_player1);
   randomState += pictureCount;   // the damage roll depends on when B was pressed
   upkeep();
   computeFog();
   camX = match.viewX[match.side];
   camY = match.viewY[match.side];
-  mapChanged = true;
   prepareBlocks();
   updateMapView();
   sceneBlack = false;
@@ -242,8 +271,6 @@ static void dropSelection() {
 static void walkPath() {
   AWUnit &u = match.units[selSide][selUnit];
   walking = true;
-  walkSide = selSide;
-  walkUnit = selUnit;
   rangeOn = arrowOn = cursorShown = false;
   mapChanged = true;
   for (uint8_t i = 0, t = 0; i < pathLength;) {
@@ -265,9 +292,8 @@ static void walkPath() {
   }
   walking = false;
   u.fortified = 0;   // walking leaves the sandbags behind
-  mapChanged = true;
   centerOn(u.c, u.r);
-  updateMapView();
+  refreshMap();
 }
 
 // ---- Fights ----
@@ -309,14 +335,12 @@ static void destroyUnit(uint8_t side, uint8_t i) {
     if (f++ % 10) continue;
     hideSide = (f / 10) % 2 ? 255 : side;
     hideUnit = i;
-    mapChanged = true;
-    updateMapView();
+    refreshMap();
   }
   hideSide = 255;
   match.units[side][i] = match.units[side][--match.unitCount[side]];
   if (!match.unitCount[side]) winner = 2 - side;   // the last unit is gone: the other side wins
-  mapChanged = true;
-  updateMapView();
+  refreshMap();
 }
 
 // The selected unit attacks enemy unit t. The cursor blinks on both for about a second, then the hit.
@@ -328,8 +352,7 @@ static void fight(uint8_t t) {
   rangeOn = cursorShown = false;
   fightC[0] = d.c; fightR[0] = d.r;
   fightC[1] = a.c; fightR[1] = a.r;
-  mapChanged = true;
-  updateMapView();
+  refreshMap();
   for (uint8_t f = 0; f < 60;) {
     drawMap();
     if (!sendLayer()) continue;
@@ -343,8 +366,7 @@ static void fight(uint8_t t) {
   uint8_t hit = rollDamage(damage(a, d));
   if (hit >= d.health) { destroyUnit(enemy, t); return; }
   d.health -= hit;
-  mapChanged = true;
-  updateMapView();
+  refreshMap();
   if (distance(a, d) != 1 || unitReach(a.kind) > 1 || unitReach(d.kind) > 1) return;
   hit = damage(d, a);
   if (!hit) return;
@@ -352,8 +374,7 @@ static void fight(uint8_t t) {
   flash(2);
   if (hit >= a.health) { destroyUnit(selSide, selUnit); return; }
   a.health -= hit;
-  mapChanged = true;
-  updateMapView();
+  refreshMap();
 }
 
 // The next target from enemy unit `from` in direction dir (1 or -1), round the list.
@@ -396,8 +417,6 @@ static void capture(uint8_t b) {
   AWUnit &u = match.units[selSide][selUnit];
   u.moved = 1;
   walking = true;
-  walkSide = selSide;
-  walkUnit = selUnit;
   walkC = u.c;
   walkR = u.r;
   for (uint8_t f = 0; f < 36;) {
@@ -418,8 +437,7 @@ static void capture(uint8_t b) {
   if (!bldKind) { winner = selSide + 1; return; }
   computeFog();
   updateMapView();
-  char_P *text = LOCA_captured;
-  showBox(&text, 1, true);
+  dialog(LOCA_captured);
 }
 
 // After the walk (or staying): ATTACK when a target is in reach, CAPTURE for infantry on a building
@@ -435,7 +453,7 @@ static void unitMenu(bool ambushed, uint8_t seenBefore) {
   while (true) {
     rangeOn = arrowOn = cursorShown = false;
     prepareCursor();
-    char_P *options[4];
+    uint24_t options[4];
     uint8_t n = 0;
     bool canAttack = markTargets();
     if (canAttack) options[n++] = LOCA_attack;
@@ -460,7 +478,6 @@ static void unitMenu(bool ambushed, uint8_t seenBefore) {
       u.c = startC;
       u.r = startR;
       u.fortified = startFortified;
-      mapChanged = true;
       centerOn(startC, startR);
       computeFog();
       updateMapView();
@@ -489,15 +506,24 @@ static void shop(uint8_t kind) {
     fillBox(3, 9, WIDTH - 6, HEIGHT - 10, BLACK);
     fillBox(4, 10, WIDTH - 8, HEIGHT - 13, WHITE);
     int8_t top = min((4 - chosen) * 8, 0);   // the list scrolls so the cursor stays on screen
+    // the names follow each other on the FX chip: one read for the whole list
+    FX::seekData(kind == 2 ? LOCA_unitNames : kind == 3 ? LOCA_planeNames : LOCA_shipNames);
     for (uint8_t i = 0; i < count; i++) {
       int8_t y = 14 + i * 8 + top;
-      if (y < 10 || y > HEIGHT - 8) continue;
+      bool shown = y >= 10 && y <= HEIGHT - 8;
       uint8_t k = first + i;
       bool canBuy = pgm_read_byte(&unitPrice[k]) <= match.money[side] && match.unitCount[side] < MaxUnits;
-      printAt(12 + (chosen == i && canBuy ? 4 : 0), y, (char_P *)pgm_read_word(&LOCA_unitNames[k]));
-      if (!canBuy) printAt(66, y, LOCA_noBuy);
+      printX = 12 + (chosen == i && canBuy ? 4 : 0);
+      printY = y;
+      char c;
+      while ((c = FX::readPendingUInt8()) != 0)
+        if (shown) printChar(c);
+      if (shown && !canBuy) { printX = 66; printChar('X'); }   // the player can not buy it
     }
-    printAt(6, 14 + chosen * 8 + top, LOCA_cursor);
+    FX::readEnd();
+    printX = 6;
+    printY = 14 + chosen * 8 + top;
+    printChar('>');
     uint8_t k = first + chosen;
     drawFX(88, 12, 24, 24, side ? unitsB : unitsA, k, arduboy.currentPlane());
     printAt(76, 38, LOCA_money);
@@ -526,17 +552,61 @@ static void shop(uint8_t kind) {
   }
 }
 
+#ifdef AW_MEASURE
+// Measuring build: a test army on map 0 and fixed test views, so tools/ardens/speedtest.py measures the
+// same pictures in every build. A on the free cursor shows the next view.
+// 16 units of player 1 packed by the forest (some hurt), 4 enemy tanks next to them.
+static void testArmy() {
+  for (uint8_t i = 0; i < 16; i++) {
+    AWUnit &u = match.units[0][i];
+    u.c = 6 + i % 4; u.r = 5 + i / 4; u.kind = i % 10; u.health = FullHealth - i % 3;
+  }
+  for (uint8_t i = 0; i < 4; i++) {
+    AWUnit &u = match.units[1][i];
+    u.c = 10 + i % 2; u.r = 6 + i / 2; u.kind = 5; u.health = FullHealth;
+  }
+  match.unitCount[0] = 16;
+  match.unitCount[1] = 4;
+}
+
+// Test views: tile under the cursor, then 0 plain, 1 unit 5 selected, 2 unit 0 selected with a
+// zigzag arrow of 9 steps.
+const uint8_t testViews[][3] PROGMEM = {
+  {7, 6, 0}, {7, 6, 1}, {8, 4, 2}, {13, 8, 0}, {8, 13, 0}, {2, 9, 0}, {5, 6, 0}, {6, 4, 0},
+};
+static void nextTestView() {
+  static uint8_t view;
+  uint8_t mode = pgm_read_byte(&testViews[view][2]);
+  turn = AWTurn::Free;
+  rangeOn = arrowOn = false;
+  cursorShown = true;
+  if (mode) {
+    selSide = 0;
+    selUnit = mode == 1 ? 5 : 0;
+    floodRange();
+    turn = AWTurn::Selected;
+  }
+  if (mode == 2) {
+    for (uint8_t i = 0; i < MaxPath; i++) pathDir[i] = i & 1 ? 3 : 0;
+    pathLength = MaxPath;
+    arrowOn = true;
+    cursorShown = false;
+  }
+  centerOn(pgm_read_byte(&testViews[view][0]), pgm_read_byte(&testViews[view][1]));
+  refreshMap();
+  view = (view + 1) % (sizeof(testViews) / 3);
+}
+#endif
+
 // A new match on map 0, as in Arduwars 1.1: no units, 1000 money, the start buildings from the map.
 static void startMatch() {
   memset(&match, 0, sizeof(match));
   loadMap(0);
   match.day = 1;
   match.money[0] = match.money[1] = 10;
-  for (uint8_t side = 0; side < 2; side++) {
-    centerOn(hqC[side], hqR[side]);
-    match.viewX[side] = camX;
-    match.viewY[side] = camY;
-  }
+#ifdef AW_MEASURE
+  testArmy();
+#endif
   winner = 0;
   turn = AWTurn::Free;
   startTurn();
@@ -544,16 +614,15 @@ static void startMatch() {
 
 // The end of the match: who won, then a new match. The results screen comes in step 3.
 static void endMatch() {
-  char_P *text = winner == 1 ? LOCA_p1Wins : winner == 2 ? LOCA_p2Wins : LOCA_draw;
   rangeOn = arrowOn = false;
   cursorShown = true;
-  showBox(&text, 1, true);
+  dialog(winner == 1 ? LOCA_p1Wins : winner == 2 ? LOCA_p2Wins : LOCA_draw);
   wipe(false);
   startMatch();
 }
 
 static void endTurnMenu() {
-  static char_P * const options[3] = { LOCA_unitsLeft, LOCA_endTurn, LOCA_cancel };
+  const uint24_t options[3] = { LOCA_unitsLeft, LOCA_endTurn, LOCA_cancel };
   uint8_t ready = readyUnits(), first = ready ? 0 : 1;
   int8_t chosen = showBox(options + first, 3 - first, false, ready);
   if (chosen < 0) return;
@@ -575,6 +644,9 @@ static void updateTurn() {
     cursorShown = !arrowOn;
     prepareCursor();
   }
+#ifdef AW_MEASURE
+  if (arduboy.justPressed(A_BUTTON)) { nextTestView(); return; }
+#endif
   if (arduboy.justPressed(A_BUTTON) && turn == AWTurn::Selected) dropSelection();
   if (!arduboy.justPressed(B_BUTTON)) return;
   if (turn == AWTurn::Selected) {
@@ -584,28 +656,30 @@ static void updateTurn() {
     if (arrowOn && pathLength) walkPath();
     computeFog();
     updateMapView();
-    if (ambushed) {
-      char_P *text = LOCA_ambush;
-      showBox(&text, 1, true);
-    }
+    if (ambushed) dialog(LOCA_ambush);
     unitMenu(ambushed, seen);
     return;
   }
-  if (cursorOn)
-    for (uint8_t i = 0; i < match.unitCount[match.side]; i++) {
-      AWUnit &u = match.units[match.side][i];
-      if (u.c != cursorC || u.r != cursorR || u.moved) continue;
+  if (cursorOn) {
+    uint8_t i = unitAt(match.side, cursorC, cursorR);
+    if (i != 255 && !match.units[match.side][i].moved) {
       selSide = match.side;
       selUnit = i;
-      startFortified = u.fortified;
+      startFortified = match.units[selSide][i].fortified;
       floodRange();
       turn = AWTurn::Selected;
       arrowOn = false;
       return;
     }
-  if (cursorOn && !unitOn(cursorC, cursorR)) {
-    uint8_t b = buildingAt(cursorC, cursorR);
-    if (b != 255 && match.buildings[b].owner == match.side + 1 && buildingKind >= 2) { shop(buildingKind); return; }
+    if (!unitOn(cursorC, cursorR)) {
+      uint8_t b = buildingAt(cursorC, cursorR);
+      if (b != 255 && match.buildings[b].owner == match.side + 1 && bldKind >= 2) {
+        shopOpen = true;
+        shop(bldKind);
+        shopOpen = false;
+        return;
+      }
+    }
   }
   endTurnMenu();
 }

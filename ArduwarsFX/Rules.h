@@ -1,7 +1,6 @@
 #pragma once
 // Move rules on the square grid, the move range of a selected unit, the path to the cursor,
 // and how the range and the movement arrow are drawn.
-#include "ArrowArt.h"
 
 // Unit kinds, game order: 0-2 infantry, 3-9 vehicles, 10-12 planes, 13-15 ships.
 // Move distance per kind, from the old game.
@@ -20,8 +19,16 @@ static uint8_t terrainBits(uint8_t kind) {
 const uint8_t unitPrice[16] PROGMEM = { 10, 30, 50,  40, 50, 60, 120, 60, 100, 150,  90, 150, 220,  120, 200, 120 };
 const uint8_t unitSight[16] PROGMEM = { 2, 1, 3,  4, 2, 2, 2, 2, 2, 2,  4, 5, 4,  4, 5, 3 };
 
-// The building on tile (c, r): its index, 255 for none. buildingKind gets its kind.
-uint8_t buildingKind;
+// Building i on the FX chip: its tile and kind.
+uint8_t bldC, bldR, bldKind;
+static void readBuilding(uint8_t i) {
+  FX::seekData(mapBuildings + i * 7);
+  bldC = FX::readPendingUInt8();
+  bldR = FX::readPendingUInt8();
+  bldKind = FX::readEnd() & 15;
+}
+
+// The building on tile (c, r): its index, 255 for none. bldKind gets its kind.
 static uint8_t buildingAt(uint8_t c, uint8_t r) {
   FX::seekData(mapFirstBuilding + c + r);
   uint8_t i = FX::readEnd();
@@ -31,19 +38,10 @@ static uint8_t buildingAt(uint8_t c, uint8_t r) {
     fxRead16();
     fxRead16();
     if (bc + br > c + r) break;
-    if (bc == c && br == r) { FX::readEnd(); buildingKind = kind; return i; }
+    if (bc == c && br == r) { FX::readEnd(); bldKind = kind; return i; }
   }
   FX::readEnd();
   return 255;
-}
-
-// Building i on the FX chip: its tile and kind.
-uint8_t bldC, bldR, bldKind;
-static void readBuilding(uint8_t i) {
-  FX::seekData(mapBuildings + i * 7);
-  bldC = FX::readPendingUInt8();
-  bldR = FX::readPendingUInt8();
-  bldKind = FX::readEnd() & 15;
 }
 
 // ---- Combat, numbers from the old game ----
@@ -73,7 +71,7 @@ constexpr uint8_t FortifyBonus = 2;   // extra defense behind sandbags, the same
 
 // Cover on tile (c, r) for ground units and ships: HQ 3, other buildings 2, mountain 3, hill 2, forest 1.
 static uint8_t coverAt(uint8_t c, uint8_t r) {
-  if (buildingAt(c, r) != 255) return buildingKind ? 2 : 3;
+  if (buildingAt(c, r) != 255) return bldKind ? 2 : 3;
   FX::seekData(mapGrid + r * mapW + c);
   uint8_t terrain = FX::readEnd() & 15;
   return terrain == 1 ? 1 : terrain == 6 ? 2 : terrain == 2 ? 3 : 0;
@@ -130,7 +128,6 @@ const int8_t dirR[4] PROGMEM = { 0, 1, 0, -1 };
 constexpr uint8_t MaxPath = 9;
 uint8_t pathDir[MaxPath], pathLength;
 bool arrowOn;                 // draw the arrow
-uint8_t pathC, pathR;         // the tile the arrow ends on
 
 static bool inRange(uint8_t c, uint8_t r) {
   uint8_t wc = c - rangeC, wr = r - rangeR;
@@ -139,11 +136,17 @@ static bool inRange(uint8_t c, uint8_t r) {
   return rangeBits[i / 8] & (1 << (i & 7));
 }
 
+// The unit of a side on a grid tile: its index, 255 for none.
+static uint8_t unitAt(uint8_t side, uint8_t c, uint8_t r) {
+  for (uint8_t i = 0; i < match.unitCount[side]; i++)
+    if (match.units[side][i].c == c && match.units[side][i].r == r) return i;
+  return 255;
+}
+
 // Who stands on a grid tile: 0 nobody, 1 player 1, 2 player 2.
 static uint8_t unitOn(uint8_t c, uint8_t r) {
   for (uint8_t side = 0; side < 2; side++)
-    for (uint8_t i = 0; i < match.unitCount[side]; i++)
-      if (match.units[side][i].c == c && match.units[side][i].r == r) return side + 1;
+    if (unitAt(side, c, r) != 255) return side + 1;
   return 0;
 }
 
@@ -266,8 +269,6 @@ static uint8_t markTargets() {
 
 // The path to tile (c, r), walked back along "came from". No arrow when the unit can not stop there.
 static void buildPath(uint8_t c, uint8_t r) {
-  pathC = c;
-  pathR = r;
   arrowOn = false;
   if (!canStop(c, r) || (c == startC && r == startR)) return;
   uint8_t n = 0;
@@ -290,33 +291,20 @@ static void buildPath(uint8_t c, uint8_t r) {
 const uint8_t maskTo[8] PROGMEM = { 0x01, 0x03, 0x07, 0x0f, 0x1f, 0x3f, 0x7f, 0xff };
 const uint8_t twoBits[8] PROGMEM = { 0x03, 0x06, 0x0c, 0x18, 0x30, 0x60, 0xc0, 0x80 };   // bits i and i+1
 
-// Rows y0 to y1 of screen column x in this layer: set the bits of `pattern` (white) or clear them.
-AW_FAST static void columnBits(int16_t x, int16_t y0, int16_t y1, bool set, uint8_t pattern = 0xff) {
-  if (x < 0 || x >= WIDTH || y1 < 0 || y0 >= HEIGHT) return;
-  if (y0 < 0) y0 = 0;
-  if (y1 >= HEIGHT) y1 = HEIGHT - 1;
-  uint8_t *b = arduboy.getBuffer() + x + (y0 >> 3) * WIDTH;
-  uint8_t pages = (y1 >> 3) - (y0 >> 3);
-  uint8_t m = pgm_read_byte(&maskFrom[y0 & 7]) & pattern, last = pgm_read_byte(&maskTo[y1 & 7]);
-  for (; pages; pages--, b += WIDTH, m = pattern)
-    if (set) *b |= m; else *b &= ~m;
-  m &= last;
-  if (set) *b |= m; else *b &= ~m;
-}
-
-static void columnRun(int16_t x, int16_t y0, int16_t y1, bool set) { columnBits(x, y0, y1, set); }
-
-// The range: reached ground gets a light gray checker (white pixels only, so only the white layer
-// changes), and a black outline with marching dashes runs around the whole area.
+// Fills tiles: the move range or the fog. Both are a set of ground diamonds.
+// The range: reached ground gets a light gray checker (every other pixel blanked in layer 0, so white
+// turns light gray), and a black outline with marching dashes runs around the whole area.
+// The fog: every fogged tile on the map gets the fog's checker in both layers (Fog.h), no outline.
+// The range takes the pixels between the fog's, so it still shows on fogged ground.
 // Drawn by screen columns. A screen column crosses two stacks of tiles (c-r = q on their left half,
 // q-1 on their right half), one diamond under the other, c+r going up by 1 each. Reached tiles one
 // under the other make one run of rows: fill it, and its first and last 2 rows are the outline.
 // The tiles in a column change only every 24 columns, so the runs are found once per group.
-AW_FAST static void drawRange(uint8_t plane, uint8_t phase) {
-  int16_t sLo = (camY - 40) / 12, sHi = (camY + HEIGHT - 16) / 12;
+AW_FAST static void drawTiles(uint8_t plane, uint8_t phase, bool fog) {
+  int8_t sLo = (camY - 40) / 12, sHi = (camY + HEIGHT - 16) / 12;   // small numbers: at most 64 diagonals
   for (uint8_t x = 0; x < WIDTH;) {
     int16_t rel = camX + x - originX;
-    int16_t q = rel >= 0 ? rel / 24 : -((23 - rel) / 24);
+    int8_t q = rel >= 0 ? rel / 24 : -((23 - rel) / 24);
     uint8_t k = rel - q * 24;
     uint8_t n = min(24 - k, WIDTH - x);
     // runs of reached tiles: screen row of the first diamond's middle and of the last one's,
@@ -325,10 +313,11 @@ AW_FAST static void drawRange(uint8_t plane, uint8_t phase) {
     uint8_t runSide = 0, runs = 0;
     bool open = false;
     int16_t row = sLo * 12 + 28 - camY;
-    for (int16_t sum = sLo; sum <= sHi + 1; sum++, row += 12) {
+    for (int8_t sum = sLo; sum <= sHi + 1; sum++, row += 12) {
       bool odd = (sum - q) & 1;
-      int16_t d = odd ? q - 1 : q;
-      bool reached = sum <= sHi && inRange((sum + d) >> 1, (sum - d) >> 1);
+      int8_t d = odd ? q - 1 : q;
+      int8_t c = (sum + d) >> 1, r = (sum - d) >> 1;
+      bool reached = sum <= sHi && (fog ? uint8_t(c) < mapW && uint8_t(r) < mapH && isFog(c, r) : inRange(c, r));
       if (reached && !open && runs < 4) { runTop[runs] = row; runSide |= odd << (2 * runs); open = true; }
       if (!reached && open) { runBottom[runs] = row - 12; runSide |= !odd << (2 * runs + 1); runs++; open = false; }
     }
@@ -338,23 +327,39 @@ AW_FAST static void drawRange(uint8_t plane, uint8_t phase) {
     for (uint8_t i = 0; i < runs; i++, runSide >>= 2) {
       uint8_t *col = col0;
       uint8_t kk = k;
-      for (uint8_t xx = x; xx < x + n; xx++, kk++, col++) {
-        uint8_t hq = (kk + 1) >> 1, hq1 = (24 - kk) >> 1;
-        int16_t top = runTop[i] - (runSide & 1 ? hq1 : hq);
-        int16_t bottom = runBottom[i] + (runSide & 2 ? hq1 : hq);
-        if (bottom < 0 || top >= HEIGHT) continue;
-        uint8_t t = top < 0 ? 0 : top, b = bottom >= HEIGHT ? HEIGHT - 1 : bottom;
-        if (plane == 2) {
-          uint8_t checker = (xx + camX + camY) & 1 ? 0xaa : 0x55;
-          uint8_t *p = col + (t & 0xf8) * 16;
-          uint8_t m = pgm_read_byte(&maskFrom[t & 7]) & checker;
-          for (uint8_t pages = (b >> 3) - (t >> 3); pages; pages--, p += WIDTH, m = checker) *p &= ~m;
-          *p &= ~(m & pgm_read_byte(&maskTo[b & 7]));
+      // per column, in small numbers: the checker's bits and the place in the 8 column dash pattern
+      uint8_t checker = fogPattern(x, fog ? plane : 1), dash = x + camX + phase;
+      // Columns come in pairs with the same rows: an odd column of the group and the even one after it.
+      int16_t top = 0, bottom = 0;
+      uint8_t t = 0, b = 0, first = 0, last = 0, pages = 0;
+      uint16_t page0 = 0;
+      bool shown = false;
+      for (uint8_t xx = x; xx < x + n; xx++, kk++, col++, checker = ~checker, dash++) {
+        if ((kk & 1) || xx == x) {
+          uint8_t hq = (kk + 1) >> 1, hq1 = (24 - kk) >> 1;
+          top = runTop[i] - (runSide & 1 ? hq1 : hq);
+          bottom = runBottom[i] + (runSide & 2 ? hq1 : hq);
+          shown = bottom >= 0 && top < HEIGHT;
+          if (shown) {
+            t = top < 0 ? 0 : top;
+            b = bottom >= HEIGHT ? HEIGHT - 1 : bottom;
+            page0 = (t & 0xf8) * 16;
+            pages = (b >> 3) - (t >> 3);
+            first = pgm_read_byte(&maskFrom[t & 7]);
+            last = pgm_read_byte(&maskTo[b & 7]);
+          }
         }
-        if (((xx + camX + phase) & 7) >= 4) continue;
+        if (!shown) continue;
+        if (fog || plane == 0) {
+          uint8_t *p = col + page0;
+          uint8_t m = first & checker;
+          for (uint8_t n = pages; n; n--, p += WIDTH, m = checker) *p &= ~m;
+          *p &= ~(m & last);
+        }
+        if (fog || (dash & 4)) continue;
         // 2 outline rows at each end of the run, where the run really ends on screen
         if (top >= 0) {
-          uint8_t *p = col + (t & 0xf8) * 16;
+          uint8_t *p = col + page0;
           *p &= ~pgm_read_byte(&twoBits[t & 7]);
           if ((t & 7) == 7 && t < HEIGHT - 1) p[WIDTH] &= ~1;
         }
@@ -370,38 +375,26 @@ AW_FAST static void drawRange(uint8_t plane, uint8_t phase) {
   }
 }
 
-// The arrow: straight parts column by column, corners and the head from ArrowArt.h.
-// All black runs first, then all white runs, then light gray dashes that run toward the target.
-AW_FAST static void drawArrow(uint8_t plane, uint8_t phase) {
-  for (uint8_t pass = 0; pass < 3; pass++) {
-    uint8_t c = startC, r = startR;
-    for (uint8_t i = 0; i < pathLength; i++) {
-      uint8_t d = pathDir[i];
-      int8_t sx = d == 0 || d == 3 ? 1 : -1, sy = d < 2 ? 1 : -1;
-      int16_t ax = tileX(c, r) - camX + 24, ay = tileY(c, r) - camY + 28;
-      bool last = i == pathLength - 1;
-      uint8_t k0 = i > 0 && pathDir[i - 1] != d ? CornerCols : 0;
-      uint8_t k1 = last ? 24 - HeadCols : pathDir[i + 1] != d ? 24 - CornerCols : 24;
-      for (uint8_t k = k0; k <= k1; k++) {
-        int16_t x = ax + sx * k, y = ay + sy * (k >> 1);
-        if (x < 0 || x >= WIDTH) continue;
-        if (pass == 0) {
-          int16_t ya = ay + sy * (int8_t(k - 1) >> 1), yb = ay + sy * ((k + 1) >> 1);
-          columnRun(x, min(ya, yb) - 2, max(ya, yb) + 2, false);
-        } else if (pass == 1) columnRun(x, y - 1, y + 1, true);
-        else if (plane == 2 && uint8_t(i * 24 + k - phase) % 8 < 3) columnBits(x, y, y, false);
-      }
-      c += pgm_read_byte(&dirC[d]);
-      r += pgm_read_byte(&dirR[d]);
-      if (pass == 2) continue;
-      uint8_t p = last ? 16 + d : pathDir[i + 1] != d ? d * 4 + pathDir[i + 1] : 255;
-      if (p == 255) continue;
-      int16_t cx = tileX(c, r) - camX + 24, cy = tileY(c, r) - camY + 28;
-      uint16_t from = pgm_read_word(&arrowPieces[p][pass]);
-      uint16_t to = pass ? pgm_read_word(&arrowPieces[p + 1][0]) : pgm_read_word(&arrowPieces[p][1]);
-      for (const int8_t *run = arrowRuns + from * 3; run < arrowRuns + to * 3; run += 3)
-        columnRun(cx + int8_t(pgm_read_byte(run)), cy + int8_t(pgm_read_byte(run + 1)), cy + int8_t(pgm_read_byte(run + 2)), pass);
+// The arrow: one tile picture per step of the path, in path order, later tiles over earlier ones.
+// Tiles from Assets/Sprites/arrow_48x24.png (tools/arrowart.py): starts 0-3 by direction, straights
+// 4-5 by axis, corners 6-9 by the two neighbors they join, heads 10-13 by direction.
+static void drawArrow(uint8_t plane) {
+  uint8_t c = startC, r = startR, from = 0;
+  for (uint8_t i = 0; i <= pathLength; i++) {
+    uint8_t d = i < pathLength ? pathDir[i] : from, tile;
+    if (i == 0) tile = d;
+    else if (i == pathLength) tile = 10 + d;
+    else if (d == from) tile = 4 + (d & 1);
+    else {
+      uint8_t back = from ^ 2;   // the neighbors it joins are next to each other: the lower one names the corner
+      tile = 6 + (((back + 1) & 3) == d ? back : d);
     }
+    AWTop t;
+    memcpy_P(&t, &arrowTable[tile], sizeof(t));
+    SpritesU::drawBasic(tileX(c, r) - camX + t.x, tileY(c, r) + 16 - camY + t.y, t.w, t.h, arrowTiles + t.start, plane, SpritesU::MODE_PLUSMASKFX);
+    c += pgm_read_byte(&dirC[d]);
+    r += pgm_read_byte(&dirR[d]);
+    from = d;
   }
 }
 
@@ -464,5 +457,5 @@ static void computeFog() {
     seeFrom(bldC, bldR, 2, true, ground);
   }
   memset(ground, 0, WIDTH * HEIGHT / 8);
-  fogChanged = mapChanged = true;
+  mapChanged = true;
 }

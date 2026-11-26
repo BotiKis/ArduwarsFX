@@ -22,19 +22,19 @@ uint24_t mapBuildings;    // FX address: 7 bytes per building, back to front
 uint8_t tallBits[MaxMapSize * MaxMapSize / 8];   // tiles with a tree or mountain top, bit r*32 + c
 uint24_t mapBlockTable;   // FX address: one uint16 per 64x64 block
 uint8_t mapW, mapH, blockCols, buildingCount;
-int16_t originX, maxCamX, maxCamY;
+int16_t originX;
 
 int16_t camX, camY;       // map picture pixel at the top left of the screen
 uint8_t cursorC, cursorR;   // the tile under the screen center
 bool cursorOn;              // false when the screen center is off the map
-uint8_t hqC[2], hqR[2];     // each player's HQ
 bool mapChanged;          // set when units or owners change: the draw list is made again
-uint8_t pictureCount;     // counts pictures, for the marching outline and the running dashes
+uint8_t pictureCount;     // counts pictures, for the marching outline of the range
 bool cursorShown = true;  // false while the arrow, a walk or a box shows
 
-// A unit on its walk: drawn at a pixel position instead of its tile, in the cursor's part of the draw list.
+// The selected unit on its walk: drawn at a pixel position instead of its tile, in the cursor's part
+// of the draw list.
 bool walking;
-uint8_t walkSide, walkUnit, walkC, walkR;   // walkC, walkR: the tile it walks into
+uint8_t walkC, walkR;                       // the tile it walks into
 int16_t walkX, walkY;                       // its picture on the map picture
 
 // A fight: the cursor shows on both tiles while fightOn. A unit hidden while it flickers out.
@@ -46,12 +46,15 @@ uint8_t hideSide = 255, hideUnit;
 extern int16_t printX, printY;
 static void printChar(char c);
 static void drawTopBar();
+static void prepareTopBar();
+AW_FAST static void drawBadge(int16_t x, int16_t y, uint8_t health);
 constexpr uint8_t CenterY = (HEIGHT + 7) / 2;   // middle of the map below the top bar
 
-// In Rules.h: the move range and the movement arrow, drawn under the units.
+// In Rules.h: the selected unit, and the move range and the movement arrow, drawn under the units.
+extern uint8_t selSide, selUnit;
 extern bool rangeOn, arrowOn;
-AW_FAST static void drawRange(uint8_t plane, uint8_t phase);
-AW_FAST static void drawArrow(uint8_t plane, uint8_t phase);
+AW_FAST static void drawTiles(uint8_t plane, uint8_t phase, bool fog);
+static void drawArrow(uint8_t plane);
 
 // The 2 to 6 blocks on screen: block index in mapBlocks.
 uint16_t blocks[2][3];
@@ -74,8 +77,8 @@ constexpr uint8_t MaxDrawItems = MaxListItems + 4;
 AWDrawItem drawItems[MaxDrawItems];
 uint8_t drawOrder[MaxDrawItems];   // item numbers sorted by key
 uint8_t drawCount, listCount, drawLimit;
-int16_t listX = -1000, listY;      // camera when the units' part was made
-int16_t winX0, winY0, winX1, winY1;   // map picture area the list covers
+int16_t winX0, winY0;              // top left of the map picture area the list covers
+constexpr int16_t ListW = WIDTH + 2 * ListMargin, ListH = HEIGHT + 2 * ListMargin;   // its size
 
 // Buildings in that area, for the tops in front of the cursor.
 struct AWNearBuilding { uint8_t c, r, kind; int16_t x, y; };
@@ -131,10 +134,8 @@ static void loadMap(uint8_t index) {
   FX::readEnd();
   originX = (mapH - 1) * 24;
   mapChanged = true;
-  maxCamX = (mapW + mapH) * 24 - WIDTH;
-  maxCamY = (mapW + mapH) * 12 + 24 - HEIGHT;
 
-  // Start owners and HQs, and the cursor on player 1's HQ.
+  // Start owners, and each side's camera on its HQ.
   match.map = index;
   FX::seekData(mapBuildings);
   for (uint8_t i = 0; i < buildingCount; i++) {
@@ -145,15 +146,17 @@ static void loadMap(uint8_t index) {
     fxRead16();
     match.buildings[i].owner = kindOwner >> 4;
     match.buildings[i].capture = fullCapture(kindOwner & 15);
-    if ((kindOwner & 15) == 0 && kindOwner >> 4) { hqC[(kindOwner >> 4) - 1] = c; hqR[(kindOwner >> 4) - 1] = r; }
+    if ((kindOwner & 15) == 0 && kindOwner >> 4) {   // an HQ: its side's first view
+      centerOn(c, r);
+      match.viewX[(kindOwner >> 4) - 1] = camX;
+      match.viewY[(kindOwner >> 4) - 1] = camY;
+    }
   }
   FX::readEnd();
-  centerOn(hqC[0], hqR[0]);
-  findCursor();
 }
 
 AW_FAST static void addDrawItem(uint8_t key, AWPic pic, uint8_t frame, int16_t x, int16_t y) {
-  if (x <= winX0 - 48 || x >= winX1 || y <= winY0 - 48 || y >= winY1) return;
+  if (x <= winX0 - 48 || x >= winX0 + ListW || y <= winY0 - 48 || y >= winY0 + ListH) return;
   // ponytail: a full list drops the rest. 48 items fit a crowded screen and its margin.
   if (drawCount == drawLimit) return;
   drawItems[drawCount] = { key, pic, frame, x, y };
@@ -193,18 +196,11 @@ static bool hasStanding(uint8_t c, uint8_t r) {
   return false;
 }
 
-static void setListArea(int16_t margin) {
-  winX0 = camX - margin;
-  winY0 = camY - margin;
-  winX1 = camX + WIDTH + margin;
-  winY1 = camY + HEIGHT + margin;
-}
-
 // The units' part of the draw list, when the camera left the area of the last one.
 AW_FAST static void prepareList() {
-  listX = camX;
-  listY = camY;
-  setListArea(ListMargin);
+  winX0 = camX - ListMargin;
+  winY0 = camY - ListMargin;
+  int16_t winX1 = winX0 + ListW, winY1 = winY0 + ListH;
   drawCount = standCount = nearCount = 0;
   drawLimit = MaxListItems;
   // Tiles in the area, a little generous: diagonal c+r and screen column c-r.
@@ -213,7 +209,7 @@ AW_FAST static void prepareList() {
   for (uint8_t side = 0; side < 2; side++)
     for (uint8_t i = 0; i < match.unitCount[side]; i++) {
       AWUnit &u = match.units[side][i];
-      if ((walking && side == walkSide && i == walkUnit) || (side == hideSide && i == hideUnit)) continue;
+      if ((walking && side == selSide && i == selUnit) || (side == hideSide && i == hideUnit)) continue;
       int8_t c = u.c, r = u.r;
       if (c + r < sLo || c + r > sHi || c - r < dLo || c - r > dHi) continue;
       if (side != match.side && isFog(c, r)) continue;   // hidden in the fog
@@ -287,8 +283,8 @@ AW_FAST static void prepareCursor() {
   drawCount = listCount;
   drawLimit = MaxDrawItems;
   if (walking) {
-    AWUnit &u = match.units[walkSide][walkUnit];
-    addDrawItem((walkC + walkR) * 4 + 3, AWPic(uint8_t(AWPic::UnitA) + walkSide), u.kind | u.health << 4, walkX, walkY);
+    AWUnit &u = match.units[selSide][selUnit];
+    addDrawItem((walkC + walkR) * 4 + 3, AWPic(uint8_t(AWPic::UnitA) + selSide), u.kind | u.health << 4, walkX, walkY);
     addFronts(walkC, walkR);
     addFronts(u.c, u.r);
   }
@@ -313,45 +309,58 @@ static void prepareBlocks() {
   }
 }
 
-static void drawFX(int16_t x, int16_t y, uint8_t w, uint8_t h, uint24_t image, uint8_t frame, uint8_t plane) {
-  // graysprite pictures: 4 size bytes first, 3 frames per picture, one per layer
-  SpritesU::drawBasic(x, y, w, h, image + 4, frame * 3 + plane, SpritesU::MODE_PLUSMASKFX);
+// While the shop is open, its box hides the middle of the screen: columns 6 to 121, rows 9 to 62 are
+// covered for sure (fillBox in shop). A picture 24 rows tall that lies inside is not drawn.
+bool shopOpen;
+static bool underShop(int16_t x, int16_t y, uint8_t w) {
+  return shopOpen && x >= 6 && x <= WIDTH - 6 - w && y >= 9 && y <= HEIGHT - 1 - 24;
 }
 
-static void drawMap() {
+// The unit sheets unitsA, unitsB, unitsADone, unitsBDone must follow each other in fxdata.txt.
+constexpr uint16_t UnitSheetSize = unitsB - unitsA;
+static_assert(unitsADone - unitsB == UnitSheetSize && unitsBDone - unitsADone == UnitSheetSize, "unit sheets out of order in fxdata.txt");
+
+static void drawFX(int16_t x, int16_t y, uint8_t w, uint8_t h, uint24_t image, uint8_t frame, uint8_t plane) {
+  // graysprite pictures: 4 size bytes first, a frame per layer for each picture
+  SpritesU::drawBasic(x, y, w, h, image + 4, frame * Planes + plane, SpritesU::MODE_PLUSMASKFX);
+}
+
+AW_FAST static void drawMap() {
   uint8_t plane = arduboy.currentPlane();
   for (uint8_t br = 0; br < 2; br++)
     for (uint8_t bc = 0; bc < 3; bc++) {
       int16_t x = (blockC + bc) * 64 - camX, y = (blockR + br) * 64 - camY;
-      if (x < WIDTH && y < HEIGHT && !(plane < 2 && (darkBlocks & (1 << (br * 3 + bc)))))
-        SpritesU::drawBasic(x, y, 64, 64, mapBlocks, blocks[br][bc] * 3 + plane, SpritesU::MODE_OVERWRITEFX);
+      if (x < WIDTH && y < HEIGHT)
+        SpritesU::drawBasic(x, y, 64, 64, mapBlocks, blocks[br][bc] * Planes + plane, SpritesU::MODE_OVERWRITEFX);
     }
-  if (plane < 2) drawFog();
   uint8_t phase = pictureCount >> 1;
-  if (rangeOn) drawRange(plane, phase);
-  if (arrowOn) drawArrow(plane, phase);
+  drawTiles(plane, 0, true);   // the fog
+  if (rangeOn) drawTiles(plane, phase, false);
+  if (arrowOn) drawArrow(plane);
   for (uint8_t i = 0; i < drawCount; i++) {
     AWDrawItem &d = drawItems[drawOrder[i]];
     int16_t x = d.x - camX, y = d.y - camY;
     if (x <= -48 || x >= WIDTH || y <= -48 || y >= HEIGHT) continue;
+    if (underShop(x, y, d.pic >= AWPic::Mark ? 24 : 48)) continue;   // tops and the cursor are 48 wide
     uint8_t pic = uint8_t(d.pic), kind = d.frame & 15;
     switch (AWPic(pic & ~PicFortified)) {
       case AWPic::Top:
       case AWPic::DarkTop: {
         AWTop t;
         memcpy_P(&t, &mapTopTable[d.frame], sizeof(t));
-        // in fog: blank under its mask in layers 0 and 1, layer 2 draws its white pixels
-        if (d.pic == AWPic::DarkTop && plane < 2) { clearMask(x + t.x, y + t.y, t.w, t.h / 8, mapTops + t.start, 2); break; }
         SpritesU::drawBasic(x + t.x, y + t.y, t.w, t.h, mapTops + t.start, plane, SpritesU::MODE_PLUSMASKFX);
+        if (d.pic == AWPic::DarkTop) fogMask(x + t.x, y + t.y, t.w, t.h / 8, mapTops + t.start, plane);   // a top in fog
         break;
       }
       case AWPic::Cursor: drawFX(x, y, 48, 24, cursor, d.frame, plane); break;
-      case AWPic::UnitA:  drawFX(x, y, 24, 24, unitsA, kind, plane); break;
-      case AWPic::UnitB:  drawFX(x, y, 24, 24, unitsB, kind, plane); break;
-      case AWPic::UnitADone: drawFX(x, y, 24, 24, unitsADone, kind, plane); break;
-      case AWPic::UnitBDone: drawFX(x, y, 24, 24, unitsBDone, kind, plane); break;
       case AWPic::Mark:   drawFX(x, y, 8, 8, marks, d.frame, plane); break;
-      default: break;
+      case AWPic::Bar: break;
+      default: {   // a unit: its sheet by side and done, the 4 sheets follow each other on the FX chip
+        uint24_t sheet = unitsA;
+        for (uint8_t n = (pic & ~PicFortified) - uint8_t(AWPic::UnitA); n; n--) sheet += UnitSheetSize;
+        drawFX(x, y, 24, 24, sheet, kind, plane);
+        break;
+      }
     }
     if (pic & PicFortified) drawFX(x, y + 15, 24, 8, sandbags, 0, plane);
   }
@@ -367,23 +376,19 @@ static void drawMap() {
       SpritesU::fillRect(x + 14, y + 36, d.frame, 2, 1);
       continue;
     }
-    if (d.pic < AWPic::UnitA || health >= 10 || x < -20 || x > WIDTH - 24 || y < -19 || y > HEIGHT - 23) continue;
-    SpritesU::fillRect(x + 18, y + 17, 6, 7, 0);   // black box, white inside, in every layer
-    SpritesU::fillRect(x + 19, y + 18, 5, 6, 1);
-    printX = x + 20;
-    printY = y + 19;
-    printChar('0' + health);
+    if (d.pic < AWPic::UnitA || health >= 10 || x < -20 || x > WIDTH - 24 || y < -19 || y > HEIGHT - 23 || underShop(x, y, 24)) continue;
+    drawBadge(x + 18, y + 17, health);
   }
   drawTopBar();
 }
 
 // Once per picture: the D-pad pans the camera freely, the cursor is the tile under the screen center.
-// 3 pixels per picture, 6 after holding the D-pad for half a second.
+// 2 pixels per picture, 4 after holding the D-pad for half a second.
 static void panCamera() {
   static uint8_t held;
   if (!arduboy.anyPressed(LEFT_BUTTON | RIGHT_BUTTON | UP_BUTTON | DOWN_BUTTON)) held = 0;
   else if (held < PicturesPerSecond / 2) held++;
-  uint8_t speed = held < PicturesPerSecond / 2 ? 3 : 6;
+  uint8_t speed = held < PicturesPerSecond / 2 ? 2 : 4;
   if (arduboy.pressed(LEFT_BUTTON)) camX -= speed;
   if (arduboy.pressed(RIGHT_BUTTON)) camX += speed;
   if (arduboy.pressed(UP_BUTTON)) camY -= speed;
@@ -392,20 +397,27 @@ static void panCamera() {
 
 // Once per picture, after the camera moved: blocks, cursor and draw list.
 static void updateMapView() {
-  camX = constrain(camX, 0, maxCamX);
-  camY = constrain(camY, 0, maxCamY);
+  camX = constrain(camX, 0, (mapW + mapH) * 24 - WIDTH);
+  camY = constrain(camY, 0, (mapW + mapH) * 12 + 24 - HEIGHT);
   uint8_t lastC = cursorC, lastR = cursorR;
   bool wasOn = cursorOn;
   findCursor();
   static int16_t lastCamX = -1, lastCamY;
-  if (camX != lastCamX || camY != lastCamY) prepareBlocks();
-  prepareFog();
+  bool moved = camX != lastCamX || camY != lastCamY;
   lastCamX = camX;
   lastCamY = camY;
+  if (moved) prepareBlocks();
   // The units' part of the draw list only when the camera left its area or units changed.
-  if (mapChanged || abs(camX - listX) > ListMargin || abs(camY - listY) > ListMargin) {
+  if (mapChanged) prepareTopBar();   // whatever the bar shows changes together with the map
+  if (mapChanged || abs(camX - winX0 - ListMargin) > ListMargin || abs(camY - winY0 - ListMargin) > ListMargin) {
     prepareList();
     prepareCursor();
   } else if (walking || cursorC != lastC || cursorR != lastR || cursorOn != wasOn) prepareCursor();
   mapChanged = false;
+}
+
+// Units or owners changed: the draw list is made again now.
+static void refreshMap() {
+  mapChanged = true;
+  updateMapView();
 }
