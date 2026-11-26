@@ -10,6 +10,7 @@
 #define SPRITESU_IMPLEMENTATION
 #define SPRITESU_FX
 #define SPRITESU_PLUSMASK
+#define SPRITESU_RECT
 #include "SpritesU.hpp"
 #include "fxdata/fxdata.h"
 #include "fxdata/mapTops.h"
@@ -19,22 +20,22 @@ ARDUBOY_NO_USB   // to upload, hold DOWN while switching on
 
 #include "Match.h"
 #include "MapView.h"
+#include "Rules.h"
 
-enum class AWScreen : uint8_t { Map };
-AWScreen screen = AWScreen::Map;
-
-// Dev readouts, top left. Hold A: work time per layer in microseconds (thinking and drawing), the worst
-// of the last second. Hold A and B: layers that came late in the last second (more than 6.4 ms with sending).
+// Dev readouts, top left, when switched on here: the worst work time per layer in microseconds
+// (thinking and drawing) in the last second, then the layers that came late in the last second
+// (more than 6.4 ms with sending). Must stay 0.
+constexpr bool DevReadouts = false;
 uint16_t layerStart, worstTime, shownTime;
 uint8_t pictures, lateLayers, shownLate;
 
-static void drawNumber(uint16_t n) {
-  // White 3x5 digits on black in the top left corner, straight into the screen buffer.
+static void drawNumber(uint8_t x, uint16_t n) {
+  // White 3x5 digits on black at the top, straight into the screen buffer.
   static const uint8_t digits[] PROGMEM = {
     0x1f, 0x11, 0x1f,  0x12, 0x1f, 0x10,  0x1d, 0x15, 0x17,  0x15, 0x15, 0x1f,  0x07, 0x04, 0x1f,
     0x17, 0x15, 0x1d,  0x1f, 0x15, 0x1d,  0x01, 0x01, 0x1f,  0x1f, 0x15, 0x1f,  0x17, 0x15, 0x1f,
   };
-  uint8_t *b = arduboy.getBuffer();
+  uint8_t *b = arduboy.getBuffer() + x;
   for (uint8_t i = 0; i < 21; i++) b[i] = 0;
   for (uint8_t i = 5; i-- > 0; n /= 10) {
     const uint8_t *d = digits + (n % 10) * 3;
@@ -59,35 +60,22 @@ static void placeTestUnits() {
   }
 }
 
-void setup() {
-  arduboy.boot();
-  arduboy.flashlight();
-  FX::begin(FX_DATA_PAGE);
-  loadMap(0);
-  placeTestUnits();
-  FX::enableOLED();
-  arduboy.startGray();
-  FX::disableOLED();
-}
-
-void loop() {
-  switch (screen) {
-    case AWScreen::Map: drawMap(); break;
-  }
+// Sends the layer just drawn. Returns true once per picture, after reading the buttons: then think.
+// The thinking time counts toward the next layer.
+static bool sendLayer() {
   uint16_t took = micros() - layerStart;
   if (took > worstTime) worstTime = took;
   if (abg_detail::needs_display) lateLayers++;   // the timer already wants the next layer
-  if (arduboy.pressed(A_BUTTON)) drawNumber(arduboy.pressed(B_BUTTON) ? shownLate : shownTime);
+  if (DevReadouts) { drawNumber(0, shownTime); drawNumber(22, shownLate); }
 
   // The screen and the FX chip share their wires: the screen listens only now.
   FX::enableOLED();
   arduboy.waitForNextPlane();
   FX::disableOLED();
   layerStart = micros();
-  if (!arduboy.needsUpdate()) return;
-
-  // Once per picture: read the buttons and think. This time counts toward the next layer.
+  if (!arduboy.needsUpdate()) return false;
   arduboy.pollButtons();
+  pictureCount++;
   if (++pictures == 52) {
     pictures = 0;
     shownTime = worstTime;
@@ -95,7 +83,30 @@ void loop() {
     shownLate = lateLayers;
     lateLayers = 0;
   }
-  switch (screen) {
-    case AWScreen::Map: updateMapView(); break;
+  return true;
+}
+
+#include "Turn.h"
+
+void setup() {
+  arduboy.boot();
+  arduboy.flashlight();
+  FX::begin(FX_DATA_PAGE);
+  loadMap(0);
+  placeTestUnits();
+  match.day = 1;
+  for (uint8_t side = 0; side < 2; side++) {
+    centerOn(hqC[side], hqR[side]);
+    match.viewX[side] = camX;
+    match.viewY[side] = camY;
   }
+  FX::enableOLED();
+  arduboy.startGray();
+  FX::disableOLED();
+  startTurn();
+}
+
+void loop() {
+  drawMap();
+  if (sendLayer()) updateTurn();
 }

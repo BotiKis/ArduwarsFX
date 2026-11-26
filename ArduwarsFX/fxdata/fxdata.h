@@ -6,8 +6,8 @@ using uint24_t = __uint24;
 
 // Initialize FX hardware using  FX::begin(FX_DATA_PAGE); in the setup() function.
 
-constexpr uint16_t FX_DATA_PAGE  = 0xfddb;
-constexpr uint24_t FX_DATA_BYTES = 140443;
+constexpr uint16_t FX_DATA_PAGE  = 0xfda5;
+constexpr uint24_t FX_DATA_BYTES = 154275;
 
 constexpr uint24_t mapBlocks = 0x000000;
 constexpr uint24_t mapTops = 0x01DA00;
@@ -18,3 +18,5 @@ constexpr uint24_t cursor = 0x01EACB;
 constexpr uint24_t marks = 0x01EE2F;
 constexpr uint24_t unitsA = 0x01EE93;
 constexpr uint24_t unitsB = 0x020997;
+constexpr uint24_t unitsADone = 0x02249B;
+constexpr uint24_t unitsBDone = 0x023F9F;

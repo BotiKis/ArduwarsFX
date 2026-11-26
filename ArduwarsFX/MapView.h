@@ -29,12 +29,24 @@ uint8_t cursorC, cursorR;   // the tile under the screen center
 bool cursorOn;              // false when the screen center is off the map
 uint8_t hqC[2], hqR[2];     // each player's HQ
 bool mapChanged;          // set when units or owners change: the draw list is made again
+uint8_t pictureCount;     // counts pictures, for the marching outline and the running dashes
+bool cursorShown = true;  // false while the arrow, a walk or a box shows
+
+// A unit on its walk: drawn at a pixel position instead of its tile, in the cursor's part of the draw list.
+bool walking;
+uint8_t walkSide, walkUnit, walkC, walkR;   // walkC, walkR: the tile it walks into
+int16_t walkX, walkY;                       // its picture on the map picture
+
+// In Rules.h: the move range and the movement arrow, drawn under the units.
+extern bool rangeOn, arrowOn;
+AW_FAST static void drawRange(uint8_t plane, uint8_t phase);
+AW_FAST static void drawArrow(uint8_t plane, uint8_t phase);
 
 // The 2 to 6 blocks on screen: block index in mapBlocks.
 uint16_t blocks[2][3];
 uint8_t blockC, blockR;   // first block column and row on screen
 
-enum class AWPic : uint8_t { Top, Cursor, UnitA, UnitB, Mark };
+enum class AWPic : uint8_t { Top, Cursor, UnitA, UnitB, UnitADone, UnitBDone, Mark };
 struct AWDrawItem {
   uint8_t key;            // draw order: diagonal c+r times 4, then top 0, mark 1, cursor 2, unit 3
   AWPic pic;
@@ -181,11 +193,12 @@ AW_FAST static void prepareList() {
   for (uint8_t side = 0; side < 2; side++)
     for (uint8_t i = 0; i < match.unitCount[side]; i++) {
       AWUnit &u = match.units[side][i];
+      if (walking && side == walkSide && i == walkUnit) continue;
       int8_t c = u.c, r = u.r;
       if (c + r < sLo || c + r > sHi || c - r < dLo || c - r > dHi) continue;
       // unit bottom 6 pixels below the diamond center
       uint8_t before = drawCount;
-      addDrawItem((c + r) * 4 + 3, side ? AWPic::UnitB : AWPic::UnitA, u.kind, tileX(c, r) + 12, tileY(c, r) + 10);
+      addDrawItem((c + r) * 4 + 3, AWPic(uint8_t(AWPic::UnitA) + side + 2 * u.moved), u.kind, tileX(c, r) + 12, tileY(c, r) + 10);
       if (drawCount == before) continue;
       if (standCount < MaxStanding) { standC[standCount] = c; standR[standCount++] = r; }
       addFront(c + 1, r);
@@ -217,16 +230,8 @@ AW_FAST static void prepareList() {
   listCount = drawCount;
 }
 
-// The cursor's part of the draw list, each picture the cursor changed tile and after prepareList.
-AW_FAST static void prepareCursor() {
-  uint8_t n = 0;
-  for (uint8_t i = 0; i < drawCount; i++)
-    if (drawOrder[i] < listCount) drawOrder[n++] = drawOrder[i];
-  drawCount = listCount;
-  drawLimit = MaxDrawItems;
-  if (!cursorOn) return;
-  uint8_t c = cursorC, r = cursorR;
-  addDrawItem((c + r) * 4 + 2, AWPic::Cursor, 0, tileX(c, r), tileY(c, r) + 16);
+// The tops of trees, mountains and buildings in front of tile (c, r).
+static void addFronts(uint8_t c, uint8_t r) {
   addFront(c + 1, r);
   addFront(c, r + 1);
   addFront(c + 1, r + 1);
@@ -235,6 +240,26 @@ AW_FAST static void prepareCursor() {
     if ((b.c == c + 1 && b.r == r) || (b.c == c && b.r == r + 1) || (b.c == c + 1 && b.r == r + 1))
       addTop((b.c + b.r) * 4, b.kind, b.x, b.y);
   }
+}
+
+// The cursor's part of the draw list (cursor or walking unit), each picture the cursor changed tile,
+// each picture of a walk, and after prepareList.
+AW_FAST static void prepareCursor() {
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < drawCount; i++)
+    if (drawOrder[i] < listCount) drawOrder[n++] = drawOrder[i];
+  drawCount = listCount;
+  drawLimit = MaxDrawItems;
+  if (walking) {
+    AWUnit &u = match.units[walkSide][walkUnit];
+    addDrawItem((walkC + walkR) * 4 + 3, AWPic(uint8_t(AWPic::UnitA) + walkSide), u.kind, walkX, walkY);
+    addFronts(walkC, walkR);
+    addFronts(u.c, u.r);
+  }
+  if (!cursorOn || !cursorShown) return;
+  uint8_t c = cursorC, r = cursorR;
+  addDrawItem((c + r) * 4 + 2, AWPic::Cursor, 0, tileX(c, r), tileY(c, r) + 16);
+  addFronts(c, r);
 }
 
 // The 2 to 6 map blocks on screen.
@@ -261,6 +286,9 @@ static void drawMap() {
       if (x < WIDTH && y < HEIGHT)
         SpritesU::drawBasic(x, y, 64, 64, mapBlocks, blocks[br][bc] * 3 + plane, SpritesU::MODE_OVERWRITEFX);
     }
+  uint8_t phase = pictureCount >> 1;
+  if (rangeOn) drawRange(plane, phase);
+  if (arrowOn) drawArrow(plane, phase);
   for (uint8_t i = 0; i < drawCount; i++) {
     AWDrawItem &d = drawItems[drawOrder[i]];
     int16_t x = d.x - camX, y = d.y - camY;
@@ -275,18 +303,28 @@ static void drawMap() {
       case AWPic::Cursor: drawFX(x, y, 48, 24, cursor, d.frame, plane); break;
       case AWPic::UnitA:  drawFX(x, y, 24, 24, unitsA, d.frame, plane); break;
       case AWPic::UnitB:  drawFX(x, y, 24, 24, unitsB, d.frame, plane); break;
+      case AWPic::UnitADone: drawFX(x, y, 24, 24, unitsADone, d.frame, plane); break;
+      case AWPic::UnitBDone: drawFX(x, y, 24, 24, unitsBDone, d.frame, plane); break;
       case AWPic::Mark:   drawFX(x, y, 8, 8, marks, d.frame, plane); break;
     }
   }
 }
 
 // Once per picture: the D-pad pans the camera freely, the cursor is the tile under the screen center.
-static void updateMapView() {
-  uint8_t speed = arduboy.pressed(B_BUTTON) ? 4 : 2;   // pixels per picture
+// 2 pixels per picture, 4 after holding the D-pad for half a second.
+static void panCamera() {
+  static uint8_t held;
+  if (!arduboy.anyPressed(LEFT_BUTTON | RIGHT_BUTTON | UP_BUTTON | DOWN_BUTTON)) held = 0;
+  else if (held < 26) held++;
+  uint8_t speed = held < 26 ? 2 : 4;
   if (arduboy.pressed(LEFT_BUTTON)) camX -= speed;
   if (arduboy.pressed(RIGHT_BUTTON)) camX += speed;
   if (arduboy.pressed(UP_BUTTON)) camY -= speed;
   if (arduboy.pressed(DOWN_BUTTON)) camY += speed;
+}
+
+// Once per picture, after the camera moved: blocks, cursor and draw list.
+static void updateMapView() {
   camX = constrain(camX, 0, maxCamX);
   camY = constrain(camY, 0, maxCamY);
   uint8_t lastC = cursorC, lastR = cursorR;
@@ -300,6 +338,6 @@ static void updateMapView() {
   if (mapChanged || abs(camX - listX) > ListMargin || abs(camY - listY) > ListMargin) {
     prepareList();
     prepareCursor();
-  } else if (cursorC != lastC || cursorR != lastR || cursorOn != wasOn) prepareCursor();
+  } else if (walking || cursorC != lastC || cursorR != lastR || cursorOn != wasOn) prepareCursor();
   mapChanged = false;
 }
