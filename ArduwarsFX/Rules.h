@@ -8,10 +8,42 @@
 const uint8_t unitMove[16] PROGMEM = { 3, 2, 5,  6, 7, 4, 4, 3, 3, 4,  5, 7, 4,  5, 6, 7 };
 
 // Terrain kinds (tools/mapconv.py): 0 Plains, 1 Forest, 2 Mountain, 3 Sea, 4 Shore, 5 Road, 6 Hill.
+// The move range adds 7: a shipyard, land for land units and water for ships.
 // Where each class of unit may go, one bit per terrain kind.
-// ponytail: buildings are not checked. A ship may enter a building that stands on water.
+// ponytail: other buildings are not checked. A ship may enter a building that stands on water.
+constexpr uint8_t Shipyard = 7;
 static uint8_t terrainBits(uint8_t kind) {
-  return kind < 3 ? 0b1100111 : kind < 10 ? 0b1100011 : kind < 13 ? 0b1111111 : 0b0011000;
+  return kind < 3 ? 0b11100111 : kind < 10 ? 0b11100011 : kind < 13 ? 0b11111111 : 0b10011000;
+}
+
+// Price per kind in hundreds, and sight in tiles, from Arduwars 1.1.
+const uint8_t unitPrice[16] PROGMEM = { 10, 30, 50,  40, 50, 60, 120, 60, 100, 150,  90, 150, 220,  120, 200, 120 };
+const uint8_t unitSight[16] PROGMEM = { 2, 1, 3,  4, 2, 2, 2, 2, 2, 2,  4, 5, 4,  4, 5, 3 };
+
+// The building on tile (c, r): its index, 255 for none. buildingKind gets its kind.
+uint8_t buildingKind;
+static uint8_t buildingAt(uint8_t c, uint8_t r) {
+  FX::seekData(mapFirstBuilding + c + r);
+  uint8_t i = FX::readEnd();
+  FX::seekData(mapBuildings + i * 7);
+  for (; i < buildingCount; i++) {
+    uint8_t bc = FX::readPendingUInt8(), br = FX::readPendingUInt8(), kind = FX::readPendingUInt8() & 15;
+    fxRead16();
+    fxRead16();
+    if (bc + br > c + r) break;
+    if (bc == c && br == r) { FX::readEnd(); buildingKind = kind; return i; }
+  }
+  FX::readEnd();
+  return 255;
+}
+
+// Building i on the FX chip: its tile and kind.
+uint8_t bldC, bldR, bldKind;
+static void readBuilding(uint8_t i) {
+  FX::seekData(mapBuildings + i * 7);
+  bldC = FX::readPendingUInt8();
+  bldR = FX::readPendingUInt8();
+  bldKind = FX::readEnd() & 15;
 }
 
 // ---- Combat, numbers from the old game ----
@@ -41,17 +73,7 @@ constexpr uint8_t FortifyBonus = 2;   // extra defense behind sandbags, the same
 
 // Cover on tile (c, r) for ground units and ships: HQ 3, other buildings 2, mountain 3, hill 2, forest 1.
 static uint8_t coverAt(uint8_t c, uint8_t r) {
-  FX::seekData(mapFirstBuilding + c + r);
-  uint8_t i = FX::readEnd();
-  FX::seekData(mapBuildings + i * 7);
-  for (; i < buildingCount; i++) {
-    uint8_t bc = FX::readPendingUInt8(), br = FX::readPendingUInt8(), kind = FX::readPendingUInt8() & 15;
-    fxRead16();
-    fxRead16();
-    if (bc + br > c + r) break;
-    if (bc == c && br == r) { FX::readEnd(); return kind ? 2 : 3; }
-  }
-  FX::readEnd();
+  if (buildingAt(c, r) != 255) return buildingKind ? 2 : 3;
   FX::seekData(mapGrid + r * mapW + c);
   uint8_t terrain = FX::readEnd() & 15;
   return terrain == 1 ? 1 : terrain == 6 ? 2 : terrain == 2 ? 3 : 0;
@@ -147,11 +169,18 @@ static void floodRange() {
     for (int8_t c = c0; c < c1; c++) ground[wr * RangeSize + c - rangeC] = FX::readPendingUInt8() & 15;
     FX::readEnd();
   }
+  // units: enemies hidden in the fog do not block, running into one is an ambush
   for (uint8_t side = 0; side < 2; side++)
     for (uint8_t i = 0; i < match.unitCount[side]; i++) {
-      uint8_t wc = match.units[side][i].c - rangeC, wr = match.units[side][i].r - rangeR;
-      if (wc < RangeSize && wr < RangeSize) who[wr * RangeSize + wc] = side + 1;
+      AWUnit &o = match.units[side][i];
+      uint8_t wc = o.c - rangeC, wr = o.r - rangeR;
+      if (wc < RangeSize && wr < RangeSize && (side == selSide || !isFog(o.c, o.r))) who[wr * RangeSize + wc] = side + 1;
     }
+  for (uint8_t i = 0; i < buildingCount; i++) {
+    readBuilding(i);
+    uint8_t wc = bldC - rangeC, wr = bldR - rangeR;
+    if (bldKind == 4 && wc < RangeSize && wr < RangeSize) ground[wr * RangeSize + wc] = Shipyard;
+  }
   uint16_t start = RangeHalf * RangeSize + RangeHalf;
   uint8_t moves = pgm_read_byte(&unitMove[u.kind]) + 1;
   if (ground[start] == 5) moves++;   // starting on a road gives one more
@@ -169,7 +198,7 @@ static void floodRange() {
         if (nc >= RangeSize || nr >= RangeSize) continue;
         uint16_t n = nr * RangeSize + nc;
         // own units can be passed, the other side's units block the way
-        if (l <= left[n] || ground[n] > 6 || !(allowed & (1 << ground[n])) || who[n] == 2 - selSide) continue;
+        if (l <= left[n] || ground[n] > Shipyard || !(allowed & (1 << ground[n])) || who[n] == 2 - selSide) continue;
         left[n] = l;
         rangeFrom[n / 4] = (rangeFrom[n / 4] & ~(3 << (n & 3) * 2)) | d << (n & 3) * 2;
       }
@@ -183,14 +212,37 @@ static void floodRange() {
 }
 
 // The unit may end its move on a reached tile where nobody stands, or where it stood.
+// An enemy hidden in the fog looks like nobody.
 static bool canStop(uint8_t c, uint8_t r) {
-  return inRange(c, r) && ((c == startC && r == startR) || !unitOn(c, r));
+  uint8_t who = unitOn(c, r);
+  return inRange(c, r) && ((c == startC && r == startR) || !who || (who == 2 - selSide && isFog(c, r)));
+}
+
+// Cuts the path at an enemy hidden in the fog: the unit stops on the last tile before it where
+// nobody stands. Returns true for an ambush.
+static bool cutAtAmbush() {
+  uint8_t c = startC, r = startR, free = 0;
+  for (uint8_t i = 0; i < pathLength; i++) {
+    c += pgm_read_byte(&dirC[pathDir[i]]);
+    r += pgm_read_byte(&dirR[pathDir[i]]);
+    uint8_t who = unitOn(c, r);
+    if (who == 2 - selSide) { pathLength = free; return true; }
+    if (!who) free = i + 1;
+  }
+  return false;
+}
+
+// Enemy units the side whose turn it is can see.
+static uint8_t seenEnemies() {
+  uint8_t n = 0, side = match.side ^ 1;
+  for (uint8_t i = 0; i < match.unitCount[side]; i++) n += !isFog(match.units[side][i].c, match.units[side][i].r);
+  return n;
 }
 
 // Enemy unit i is a target of the selected unit: in reach and it can be hit.
 static bool isTarget(uint8_t i) {
   AWUnit &u = match.units[selSide][selUnit], &e = match.units[selSide ^ 1][i];
-  return distance(u, e) <= unitReach(u.kind) && damage(u, e);
+  return distance(u, e) <= unitReach(u.kind) && !isFog(e.c, e.r) && damage(u, e);
 }
 
 // Marks the targets in the range bits, on a window around the unit (reach 4 fits). Returns how many.
@@ -234,7 +286,7 @@ static void buildPath(uint8_t c, uint8_t r) {
 // ---- Drawing, each layer, in screen pixels ----
 
 // Bit masks: from bit i up, and from bit 0 up to bit i.
-const uint8_t maskFrom[8] PROGMEM = { 0xff, 0xfe, 0xfc, 0xf8, 0xf0, 0xe0, 0xc0, 0x80 };
+// maskFrom: in Fog.h
 const uint8_t maskTo[8] PROGMEM = { 0x01, 0x03, 0x07, 0x0f, 0x1f, 0x3f, 0x7f, 0xff };
 const uint8_t twoBits[8] PROGMEM = { 0x03, 0x06, 0x0c, 0x18, 0x30, 0x60, 0xc0, 0x80 };   // bits i and i+1
 
@@ -351,4 +403,66 @@ AW_FAST static void drawArrow(uint8_t plane, uint8_t phase) {
         columnRun(cx + int8_t(pgm_read_byte(run)), cy + int8_t(pgm_read_byte(run + 1)), cy + int8_t(pgm_read_byte(run + 2)), pass);
     }
   }
+}
+
+// ---- Sight, from Arduwars 1.1 ----
+// Each unit sees its sight in grid steps, 1 farther on a mountain or a building. Mountains, hills and
+// enemy units block the view, the view goes through at most 2 forests. The tiles that block are seen.
+// Own buildings see 2 steps through everything.
+
+static void clearFog(int8_t c, int8_t r) {
+  uint16_t bit = r * 32 + c;
+  fogBits[bit >> 3] &= ~(1 << (bit & 7));
+}
+
+// The line from (c0, r0) to (c, r) on the grid (Bresenham), checked between the two ends.
+// ground: per tile r*32+c the terrain kind, +16 for an enemy unit.
+static bool lineOfSight(int8_t c0, int8_t r0, int8_t c, int8_t r, const uint8_t *ground) {
+  int8_t dx = abs(c - c0), sx = c0 < c ? 1 : -1, dy = -abs(r - r0), sy = r0 < r ? 1 : -1, err = dx + dy;
+  uint8_t forests = 0;
+  while (true) {
+    int8_t e2 = 2 * err;
+    if (e2 >= dy) { err += dy; c0 += sx; }
+    if (e2 <= dx) { err += dx; r0 += sy; }
+    if (c0 == c && r0 == r) return true;
+    uint8_t g = ground[r0 * 32 + c0];
+    if (g == 2 || g == 6 || g & 16) return false;
+    if (g == 1 && ++forests == 3) return false;
+  }
+}
+
+static void seeFrom(int8_t c0, int8_t r0, int8_t sight, bool through, const uint8_t *ground) {
+  for (int8_t dr = -sight; dr <= sight; dr++)
+    for (int8_t dc = -sight; dc <= sight; dc++) {
+      int8_t c = c0 + dc, r = r0 + dr;
+      if (abs(dr) + abs(dc) > sight || !isFog(c, r)) continue;   // off the map counts as fog
+      if (through || (!dr && !dc) || lineOfSight(c0, r0, c, r, ground)) clearFog(c, r);
+    }
+}
+
+// The fog of the side whose turn it is. Runs between two layers: it borrows the screen buffer for the
+// terrain (1 byte per tile, 32x32 fills it exactly) and clears it again.
+static void computeFog() {
+  uint8_t side = match.side;
+  uint8_t *ground = arduboy.getBuffer();
+  for (uint8_t r = 0; r < mapH; r++) {
+    FX::seekData(mapGrid + r * mapW);
+    for (uint8_t c = 0; c < mapW; c++) ground[r * 32 + c] = FX::readPendingUInt8() & 15;
+    FX::readEnd();
+  }
+  for (uint8_t i = 0; i < match.unitCount[side ^ 1]; i++) ground[match.units[side ^ 1][i].r * 32 + match.units[side ^ 1][i].c] |= 16;
+  memset(fogBits, 0xff, sizeof(fogBits));
+  for (uint8_t i = 0; i < match.unitCount[side]; i++) {
+    AWUnit &u = match.units[side][i];
+    uint8_t sight = pgm_read_byte(&unitSight[u.kind]);
+    if (ground[u.r * 32 + u.c] == 2 || buildingAt(u.c, u.r) != 255) sight++;
+    seeFrom(u.c, u.r, sight, false, ground);
+  }
+  for (uint8_t i = 0; i < buildingCount; i++) {
+    if (match.buildings[i].owner != side + 1) continue;
+    readBuilding(i);
+    seeFrom(bldC, bldR, 2, true, ground);
+  }
+  memset(ground, 0, WIDTH * HEIGHT / 8);
+  fogChanged = mapChanged = true;
 }

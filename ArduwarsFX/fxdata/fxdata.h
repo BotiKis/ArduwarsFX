@@ -6,18 +6,21 @@ using uint24_t = __uint24;
 
 // Initialize FX hardware using  FX::begin(FX_DATA_PAGE); in the setup() function.
 
-constexpr uint16_t FX_DATA_PAGE  = 0xfda4;
-constexpr uint24_t FX_DATA_BYTES = 154423;
+constexpr uint16_t FX_DATA_PAGE  = 0xfd60;
+constexpr uint24_t FX_DATA_BYTES = 171829;
 
 constexpr uint24_t mapBlocks = 0x000000;
-constexpr uint24_t mapTops = 0x01DA00;
-constexpr uint24_t map0Blocks = 0x01E378;
-constexpr uint24_t map0 = 0x01E5E8;
-constexpr uint24_t mapList = 0x01EAC7;
-constexpr uint24_t cursor = 0x01EACB;
-constexpr uint24_t marks = 0x01EE2F;
-constexpr uint24_t unitsA = 0x01EE93;
-constexpr uint24_t unitsB = 0x020997;
-constexpr uint24_t unitsADone = 0x02249B;
-constexpr uint24_t unitsBDone = 0x023F9F;
-constexpr uint24_t sandbags = 0x025AA3;
+constexpr uint24_t mapTops = 0x021600;
+constexpr uint24_t map0Blocks = 0x021F78;
+constexpr uint24_t map0 = 0x022020;
+constexpr uint24_t map1Blocks = 0x022199;
+constexpr uint24_t map1 = 0x022409;
+constexpr uint24_t mapList = 0x0228E8;
+constexpr uint24_t cursor = 0x0228EF;
+constexpr uint24_t marks = 0x022C53;
+constexpr uint24_t unitsA = 0x022CB7;
+constexpr uint24_t unitsB = 0x0247BB;
+constexpr uint24_t unitsADone = 0x0262BF;
+constexpr uint24_t unitsBDone = 0x027DC3;
+constexpr uint24_t sandbags = 0x0298C7;
+constexpr uint24_t fogWang = 0x02995B;

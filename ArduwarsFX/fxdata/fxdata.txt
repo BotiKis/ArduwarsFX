@@ -10,3 +10,4 @@ include "unitsB.txt"     // player 2 units
 include "unitsADone.txt" // player 1 units that are done for the turn: a dark gray checker over them
 include "unitsBDone.txt"
 include "sandbags.txt"   // 24x8, over the feet of a fortified unit
+include "fogWang.txt"    // fog edge masks 1-14, 48x24, 144 bytes each, no picture

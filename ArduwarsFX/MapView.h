@@ -42,9 +42,11 @@ bool fightOn;
 uint8_t fightC[2], fightR[2];
 uint8_t hideSide = 255, hideUnit;
 
-// In Turn.h: the letters, for the health number.
+// In Turn.h: the letters, for the health number, and the top bar over the map.
 extern int16_t printX, printY;
 static void printChar(char c);
+static void drawTopBar();
+constexpr uint8_t CenterY = (HEIGHT + 7) / 2;   // middle of the map below the top bar
 
 // In Rules.h: the move range and the movement arrow, drawn under the units.
 extern bool rangeOn, arrowOn;
@@ -55,7 +57,8 @@ AW_FAST static void drawArrow(uint8_t plane, uint8_t phase);
 uint16_t blocks[2][3];
 uint8_t blockC, blockR;   // first block column and row on screen
 
-enum class AWPic : uint8_t { Top, Cursor, Mark, UnitA, UnitB, UnitADone, UnitBDone };
+// DarkTop: a top in fog. Bar: capture points left of a building, frame = points.
+enum class AWPic : uint8_t { Top, DarkTop, Cursor, Mark, Bar, UnitA, UnitB, UnitADone, UnitBDone };
 constexpr uint8_t PicFortified = 0x80;   // added to a unit's pic: sandbags at its feet
 struct AWDrawItem {
   uint8_t key;            // draw order: diagonal c+r times 4, then top 0, mark 1, cursor 2, unit 3
@@ -76,7 +79,7 @@ int16_t winX0, winY0, winX1, winY1;   // map picture area the list covers
 
 // Buildings in that area, for the tops in front of the cursor.
 struct AWNearBuilding { uint8_t c, r, kind; int16_t x, y; };
-constexpr uint8_t MaxNear = 16;
+constexpr uint8_t MaxNear = 8;
 AWNearBuilding nearBuildings[MaxNear];
 uint8_t nearCount;
 
@@ -85,18 +88,20 @@ uint8_t nearCount;
 static uint16_t fxRead16() { uint16_t v = FX::readPendingUInt8() << 8; return v | FX::readPendingUInt8(); }
 static uint24_t fxRead24() { uint24_t v = uint24_t(fxRead16()) << 8; return v | FX::readPendingUInt8(); }
 
+#include "Fog.h"
+
 static int16_t tileX(uint8_t c, uint8_t r) { return (int16_t(c) - r) * 24 + originX; }
 static int16_t tileY(uint8_t c, uint8_t r) { return (c + r) * 12; }
 
 static void centerOn(uint8_t c, uint8_t r) {
   camX = tileX(c, r) + 24 - WIDTH / 2;
-  camY = tileY(c, r) + 28 - HEIGHT / 2;
+  camY = tileY(c, r) + 28 - CenterY;
 }
 
 static void findCursor() {
   // Screen center to tile: undo the projection, relative to the top corner of tile (0, 0).
   int16_t dx = camX + WIDTH / 2 - (originX + 24);
-  int16_t dy = camY + HEIGHT / 2 - 16;
+  int16_t dy = camY + CenterY - 16;
   int16_t a = 2 * dy + dx, b = 2 * dy - dx;
   cursorOn = a >= 0 && b >= 0 && a / 48 < mapW && b / 48 < mapH;
   cursorC = a / 48;
@@ -139,6 +144,7 @@ static void loadMap(uint8_t index) {
     fxRead16();
     fxRead16();
     match.buildings[i].owner = kindOwner >> 4;
+    match.buildings[i].capture = fullCapture(kindOwner & 15);
     if ((kindOwner & 15) == 0 && kindOwner >> 4) { hqC[(kindOwner >> 4) - 1] = c; hqR[(kindOwner >> 4) - 1] = r; }
   }
   FX::readEnd();
@@ -156,30 +162,34 @@ AW_FAST static void addDrawItem(uint8_t key, AWPic pic, uint8_t frame, int16_t x
   drawOrder[i] = drawCount++;
 }
 
-static void addTop(uint8_t key, uint8_t frame, int16_t x, int16_t y) {
+static void addTop(uint8_t key, AWPic pic, uint8_t frame, int16_t x, int16_t y) {
   for (uint8_t i = 0; i < drawCount; i++) {
     AWDrawItem &d = drawItems[i];
-    if (d.pic == AWPic::Top && d.key == key && d.x == x && d.frame == frame) return;   // already there
+    if (d.pic == pic && d.key == key && d.x == x && d.frame == frame) return;   // already there
   }
-  addDrawItem(key, AWPic::Top, frame, x, y);
+  addDrawItem(key, pic, frame, x, y);
 }
+
+static AWPic topPic(uint8_t c, uint8_t r) { return isFog(c, r) ? AWPic::DarkTop : AWPic::Top; }
 
 // A unit or the cursor stands right behind tile (c, r): draw the tile's tree or mountain top again.
 AW_FAST static void addFront(uint8_t c, uint8_t r) {
   uint16_t bit = r * 32 + c;
   if (c >= mapW || r >= mapH || !(tallBits[bit / 8] & (1 << (bit & 7)))) return;
   FX::seekData(mapGrid + r * mapW + c);
-  addTop((c + r) * 4, (FX::readEnd() >> 4) - 1, tileX(c, r), tileY(c, r));
+  addTop((c + r) * 4, topPic(c, r), (FX::readEnd() >> 4) - 1, tileX(c, r), tileY(c, r));
 }
 
-// Tiles with a unit in the list area, for the building tops.
+// Tiles with a unit in the list area, for the building tops. Kept at the end of the screen buffer while
+// prepareList runs between two layers, cleared again after.
 constexpr uint8_t MaxStanding = 24;
-uint8_t standC[MaxStanding], standR[MaxStanding];
+static uint8_t *standing() { return arduboy.getBuffer() + WIDTH * HEIGHT / 8 - 2 * MaxStanding; }
 uint8_t standCount;
 
 static bool hasStanding(uint8_t c, uint8_t r) {
+  uint8_t *stand = standing();
   for (uint8_t i = 0; i < standCount; i++)
-    if (standC[i] == c && standR[i] == r) return true;
+    if (stand[i] == c && stand[MaxStanding + i] == r) return true;
   return false;
 }
 
@@ -206,12 +216,13 @@ AW_FAST static void prepareList() {
       if ((walking && side == walkSide && i == walkUnit) || (side == hideSide && i == hideUnit)) continue;
       int8_t c = u.c, r = u.r;
       if (c + r < sLo || c + r > sHi || c - r < dLo || c - r > dHi) continue;
+      if (side != match.side && isFog(c, r)) continue;   // hidden in the fog
       // unit bottom 6 pixels below the diamond center
       uint8_t before = drawCount;
       addDrawItem((c + r) * 4 + 3, AWPic(uint8_t(AWPic::UnitA) + side + 2 * u.moved + (u.fortified ? PicFortified : 0)),
                   u.kind | u.health << 4, tileX(c, r) + 12, tileY(c, r) + 10);
       if (drawCount == before) continue;
-      if (standCount < MaxStanding) { standC[standCount] = c; standR[standCount++] = r; }
+      if (standCount < MaxStanding) { standing()[standCount] = c; standing()[MaxStanding + standCount++] = r; }
       addFront(c + 1, r);
       addFront(c, r + 1);
       addFront(c + 1, r + 1);
@@ -230,14 +241,28 @@ AW_FAST static void prepareList() {
     int16_t x = fxRead16();
     int16_t y = fxRead16();
     if (x <= winX0 - 48 || x >= winX1 || y <= winY0 - 48 || y >= winY1) continue;
-    // ponytail: past 16 buildings in the area, the cursor gets no building tops. A screen shows about 6.
+    // ponytail: past 8 buildings in the area, the cursor gets no building tops. A screen shows about 6.
     if (nearCount < MaxNear) nearBuildings[nearCount++] = { c, r, kind, x, y };
-    uint8_t owner = match.buildings[i].owner;
-    if (owner) addDrawItem((c + r) * 4 + 1, AWPic::Mark, owner - 1, x + 20, y + 34);   // at the front corner
-    if (hasStanding(c - 1, r) || hasStanding(c, r - 1) || hasStanding(c - 1, r - 1))
-      addDrawItem((c + r) * 4, AWPic::Top, kind, x, y);
+    AWBuilding &b = match.buildings[i];
+    bool fog = isFog(c, r);
+    if (b.owner && !fog) addDrawItem((c + r) * 4 + 1, AWPic::Mark, b.owner - 1, x + 20, y + 34);   // at the front corner
+    if (b.capture < fullCapture(kind) && !fog) addDrawItem((c + r) * 4 + 1, AWPic::Bar, b.capture, tileX(c, r), tileY(c, r));
+    if (hasStanding(c - 1, r) || hasStanding(c, r - 1) || hasStanding(c - 1, r - 1) || behindIs(c, r, !fog))
+      addDrawItem((c + r) * 4, fog ? AWPic::DarkTop : AWPic::Top, kind, x, y);
   }
   FX::readEnd();
+  // Fog edge: a seen tree or mountain stays bright over the fog behind it, one in fog stays dark over seen tiles.
+  for (int8_t s = max(sLo, 0); s <= min(sHi, int8_t(mapW + mapH - 2)); s++)
+    for (int8_t d = dLo + ((dLo ^ s) & 1); d <= dHi; d += 2) {
+      int8_t c = (s + d) >> 1, r = (s - d) >> 1;
+      uint16_t bit = r * 32 + c;
+      if (c < 0 || r < 0 || c >= int8_t(mapW) || r >= int8_t(mapH) || !(tallBits[bit / 8] & (1 << (bit & 7)))) continue;
+      bool fog = isFog(c, r);
+      if (!behindIs(c, r, !fog)) continue;
+      FX::seekData(mapGrid + r * mapW + c);
+      addTop((c + r) * 4, fog ? AWPic::DarkTop : AWPic::Top, (FX::readEnd() >> 4) - 1, tileX(c, r), tileY(c, r));
+    }
+  memset(standing(), 0, 2 * MaxStanding);
   listCount = drawCount;
 }
 
@@ -249,7 +274,7 @@ static void addFronts(uint8_t c, uint8_t r) {
   for (uint8_t i = 0; i < nearCount; i++) {
     AWNearBuilding &b = nearBuildings[i];
     if ((b.c == c + 1 && b.r == r) || (b.c == c && b.r == r + 1) || (b.c == c + 1 && b.r == r + 1))
-      addTop((b.c + b.r) * 4, b.kind, b.x, b.y);
+      addTop((b.c + b.r) * 4, topPic(b.c, b.r), b.kind, b.x, b.y);
   }
 }
 
@@ -298,9 +323,10 @@ static void drawMap() {
   for (uint8_t br = 0; br < 2; br++)
     for (uint8_t bc = 0; bc < 3; bc++) {
       int16_t x = (blockC + bc) * 64 - camX, y = (blockR + br) * 64 - camY;
-      if (x < WIDTH && y < HEIGHT)
+      if (x < WIDTH && y < HEIGHT && !(plane < 2 && (darkBlocks & (1 << (br * 3 + bc)))))
         SpritesU::drawBasic(x, y, 64, 64, mapBlocks, blocks[br][bc] * 3 + plane, SpritesU::MODE_OVERWRITEFX);
     }
+  if (plane < 2) drawFog();
   uint8_t phase = pictureCount >> 1;
   if (rangeOn) drawRange(plane, phase);
   if (arrowOn) drawArrow(plane, phase);
@@ -310,9 +336,12 @@ static void drawMap() {
     if (x <= -48 || x >= WIDTH || y <= -48 || y >= HEIGHT) continue;
     uint8_t pic = uint8_t(d.pic), kind = d.frame & 15;
     switch (AWPic(pic & ~PicFortified)) {
-      case AWPic::Top: {
+      case AWPic::Top:
+      case AWPic::DarkTop: {
         AWTop t;
         memcpy_P(&t, &mapTopTable[d.frame], sizeof(t));
+        // in fog: blank under its mask in layers 0 and 1, layer 2 draws its white pixels
+        if (d.pic == AWPic::DarkTop && plane < 2) { clearMask(x + t.x, y + t.y, t.w, t.h / 8, mapTops + t.start, 2); break; }
         SpritesU::drawBasic(x + t.x, y + t.y, t.w, t.h, mapTops + t.start, plane, SpritesU::MODE_PLUSMASKFX);
         break;
       }
@@ -322,15 +351,22 @@ static void drawMap() {
       case AWPic::UnitADone: drawFX(x, y, 24, 24, unitsADone, kind, plane); break;
       case AWPic::UnitBDone: drawFX(x, y, 24, 24, unitsBDone, kind, plane); break;
       case AWPic::Mark:   drawFX(x, y, 8, 8, marks, d.frame, plane); break;
+      default: break;
     }
     if (pic & PicFortified) drawFX(x, y + 15, 24, 8, sandbags, 0, plane);
   }
   // A hurt unit shows its health at its bottom right, over everything, so a unit in front can not
   // hide it. Only where the number fits on screen: the letters do not clip.
+  // A building under capture: a bar under its tile's unit, 1 pixel per point left.
   for (uint8_t i = 0; i < drawCount; i++) {
     AWDrawItem &d = drawItems[i];
     uint8_t health = d.frame >> 4;
     int16_t x = d.x - camX, y = d.y - camY;
+    if (d.pic == AWPic::Bar) {
+      SpritesU::fillRect(x + 13, y + 35, d.frame + 2, 4, 0);
+      SpritesU::fillRect(x + 14, y + 36, d.frame, 2, 1);
+      continue;
+    }
     if (d.pic < AWPic::UnitA || health >= 10 || x < -20 || x > WIDTH - 24 || y < -19 || y > HEIGHT - 23) continue;
     SpritesU::fillRect(x + 18, y + 17, 6, 7, 0);   // black box, white inside, in every layer
     SpritesU::fillRect(x + 19, y + 18, 5, 6, 1);
@@ -338,15 +374,16 @@ static void drawMap() {
     printY = y + 19;
     printChar('0' + health);
   }
+  drawTopBar();
 }
 
 // Once per picture: the D-pad pans the camera freely, the cursor is the tile under the screen center.
-// 2 pixels per picture, 4 after holding the D-pad for half a second.
+// 3 pixels per picture, 6 after holding the D-pad for half a second.
 static void panCamera() {
   static uint8_t held;
   if (!arduboy.anyPressed(LEFT_BUTTON | RIGHT_BUTTON | UP_BUTTON | DOWN_BUTTON)) held = 0;
-  else if (held < 26) held++;
-  uint8_t speed = held < 26 ? 2 : 4;
+  else if (held < PicturesPerSecond / 2) held++;
+  uint8_t speed = held < PicturesPerSecond / 2 ? 3 : 6;
   if (arduboy.pressed(LEFT_BUTTON)) camX -= speed;
   if (arduboy.pressed(RIGHT_BUTTON)) camX += speed;
   if (arduboy.pressed(UP_BUTTON)) camY -= speed;
@@ -362,6 +399,7 @@ static void updateMapView() {
   findCursor();
   static int16_t lastCamX = -1, lastCamY;
   if (camX != lastCamX || camY != lastCamY) prepareBlocks();
+  prepareFog();
   lastCamX = camX;
   lastCamY = camY;
   // The units' part of the draw list only when the camera left its area or units changed.

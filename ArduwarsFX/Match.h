@@ -21,16 +21,20 @@ struct AWUnit {
 };
 
 // 1 byte per building. Building i is building i of the map on the FX chip.
+// Building kinds (map order): 0 HQ, 1 City, 2 Workshop, 3 Airport, 4 Shipyard.
 struct AWBuilding {
   uint8_t owner : 2;      // AWOwner
   uint8_t capture : 6;    // capture points left
 };
 
+// Capture points, from Arduwars 1.1: infantry take their health off each turn they capture.
+static uint8_t fullCapture(uint8_t kind) { return kind ? 15 : 20; }
+
 struct AWMatch {
   uint8_t map;            // index in the map list
   uint8_t day;
   uint8_t side;           // whose turn: 0 player 1, 1 player 2
-  uint16_t money[2];
+  uint16_t money[2];      // in hundreds: 10 shows as 1000
   int16_t viewX[2], viewY[2];   // each side's camera when its turn ended
   uint8_t unitCount[2];
   AWUnit units[2][MaxUnits];

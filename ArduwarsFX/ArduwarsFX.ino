@@ -1,10 +1,14 @@
 // Arduwars FX: a turn-based strategy game for the Arduboy FX and FX Mini.
 // Grayscale: ArduboyG on timer 1 with park row sync (the bottom pixel row stays black), 4 shades,
-// 3 layers per picture, 52 pictures a second. Every layer redraws the whole screen.
+// 3 layers per picture, 100 layers (33 pictures) a second. Every layer redraws the whole screen.
 // Art and maps live on the FX flash chip and are drawn with SpritesU.
 #define ABG_IMPLEMENTATION
 #define ABG_TIMER1
 #define ABG_SYNC_PARK_ROW
+// 100 layers a second: 8.8 ms per layer to think and draw. The fog edge costs about 0.4 ms per piece,
+// at 156 (ArduboyG's default, 5.2 ms) most views with fog came late. More gray flicker on the device.
+#define ABG_REFRESH_HZ 100
+constexpr uint8_t PicturesPerSecond = ABG_REFRESH_HZ / 3;
 #include "ArduboyG.h"
 #include <ArduboyFX.h>
 #define SPRITESU_IMPLEMENTATION
@@ -24,7 +28,7 @@ ARDUBOY_NO_USB   // to upload, hold DOWN while switching on
 
 // Dev readouts, top left, when switched on here: the worst work time per layer in microseconds
 // (thinking and drawing) in the last second, then the layers that came late in the last second
-// (more than 6.4 ms with sending). Must stay 0.
+// (more than 10 ms with sending). Must stay 0.
 constexpr bool DevReadouts = false;
 uint16_t layerStart, worstTime, shownTime;
 uint8_t pictures, lateLayers, shownLate;
@@ -43,23 +47,7 @@ static void drawNumber(uint8_t x, uint16_t n) {
   }
 }
 
-// ponytail: test units, 16 kinds per side on every other tile of an 8x4 area. For the fights of step 2c
-// both armies stand face to face at player 1's HQ, player 2's 5 rows further, one free row between.
-// TestPacked 1: a 4x4 block instead, the busiest view for the draw time. The shop (step 2d) replaces this.
-constexpr bool TestPacked = 0;
-static void placeTestUnits() {
-  for (uint8_t side = 0; side < 2; side++) {
-    match.unitCount[side] = 16;
-    for (uint8_t k = 0; k < 16; k++) {
-      AWUnit &u = match.units[side][k];
-      uint8_t c = TestPacked ? (k & 3) : (k & 3) * 2 + ((k >> 2) & 1), r = k >> 2;
-      u.c = constrain(hqC[0] - 3 + c, 0, mapW - 1);
-      u.r = constrain(hqR[0] - 1 + side * 5 + r, 0, mapH - 1);
-      u.kind = k;
-      u.health = 10;
-    }
-  }
-}
+static void prepareTopBar();   // in Turn.h
 
 // Sends the layer just drawn. Returns true once per picture, after reading the buttons: then think.
 // The thinking time counts toward the next layer.
@@ -77,7 +65,8 @@ static bool sendLayer() {
   if (!arduboy.needsUpdate()) return false;
   arduboy.pollButtons();
   pictureCount++;
-  if (++pictures == 52) {
+  prepareTopBar();
+  if (++pictures == PicturesPerSecond) {
     pictures = 0;
     shownTime = worstTime;
     worstTime = 0;
@@ -93,18 +82,10 @@ void setup() {
   arduboy.boot();
   arduboy.flashlight();
   FX::begin(FX_DATA_PAGE);
-  loadMap(0);
-  placeTestUnits();
-  match.day = 1;
-  for (uint8_t side = 0; side < 2; side++) {
-    centerOn(hqC[0], hqR[0] + side * 5);
-    match.viewX[side] = camX;
-    match.viewY[side] = camY;
-  }
   FX::enableOLED();
   arduboy.startGray();
   FX::disableOLED();
-  startTurn();
+  startMatch();
 }
 
 void loop() {
