@@ -144,6 +144,10 @@ Example Usage:
 #if !defined(ABG_CONTRAST_DEFAULT)
 #define ABG_CONTRAST_DEFAULT 255
 #endif
+// Arduwars FX: the screen setting for the dim layer of L4_Contrast (default: half of contrast).
+#if !defined(ABG_L4_DIM_CONTRAST)
+#define ABG_L4_DIM_CONTRAST (contrast / 2)
+#endif
 #if !defined(ABG_PRECHARGE_CYCLES)
 #define ABG_PRECHARGE_CYCLES 1
 #endif
@@ -766,7 +770,7 @@ protected:
         if(phase == 1)
         {
             if(MODE == ABG_Mode::L4_Contrast)
-                send_cmds(0x81, (current_plane & 1) ? contrast : contrast / 2);
+                send_cmds(0x81, (current_plane & 1) ? contrast : ABG_L4_DIM_CONTRAST);
             send_cmds_prog<0xA8, 7, 0x22, 0, 7>();
         }
         else if(phase == 2)
@@ -794,7 +798,7 @@ protected:
         }
 #elif defined(ABG_SYNC_PARK_ROW) || defined(ABG_SYNC_SLOW_DRIVE)
         if(MODE == ABG_Mode::L4_Contrast)
-            send_cmds(0x81, (current_plane & 1) ? contrast : contrast / 2);
+            send_cmds(0x81, (current_plane & 1) ? contrast : ABG_L4_DIM_CONTRAST);
 #if defined(ABG_SYNC_PARK_ROW)
         paint(&b[128 * 7], clearcfg, 0x0001, 0x7f);
         send_cmds_prog<0xA8, 63>();

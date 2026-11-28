@@ -46,3 +46,64 @@ string 'FIGHTER'
 string 'BOMBER'
 LOCA_shipNames   = string 'CRUISER'
 string 'BATTLESHIP'
+
+// Title: start screen and menu screen
+LOCA_pressB      = string 'PRESS B'
+// The main menu, read one after the other: keep the order and nothing between the lines.
+// SOUND OFF shows in the place of SOUND ON.
+LOCA_mainMenu    = string '1 PLAYER'
+string '2 PLAYER'
+LOCA_soundOn     = string 'SOUND ON'
+string 'CREDITS'
+LOCA_soundOff    = string 'SOUND OFF'
+LOCA_comingSoon  = string 'COMING SOON'
+
+// The maps list: BACK, then the map names in map order (file name order in Assets/Maps). One name per map,
+// nothing between them.
+LOCA_mapsMenu    = string 'BACK'
+LOCA_mapNames    = string 'DUEL'
+string 'ISLANDS'
+
+// The credits sheet, one line per text, read one after the other: keep nothing between the lines.
+// A name, then its role in lines of at most 14 letters, each starting with ~ (printed dark gray, the ~ not).
+// CreditRows in Title.h counts the lines. LOCA_creditsBack is the BACK plate above the sheet.
+LOCA_creditsBack = string 'BACK'
+LOCA_creditSheet = string 'BOTI KIS'
+string '~PRODUCER AND'
+string '~GAME DESIGN'
+string 'PHARAP'
+string '~DEVELOPER'
+string 'BITB4NGER'
+string '~DEVELOPER'
+string 'TIBERIUSBROWN'
+string '~ARDUBOYG AND'
+string '~SPRITESU'
+string '~(GRAYSCALE AND'
+string '~DRAWING),'
+string '~ARDENS'
+string '~EMULATOR'
+string 'MRBLINKY'
+string '~ARDUBOY FX'
+string '~BOARD PACKAGE,'
+string '~FX DATA TOOL'
+
+// In the match: END TURN box and results
+LOCA_quit        = string 'QUIT'
+LOCA_quitNow     = string 'QUIT NOW'
+// Results lines, read one after the other: keep the order and nothing between the lines.
+// ResultRows in Title.h counts them.
+LOCA_resultRows  = string 'DAYS'
+string 'DESTROYED'
+string 'UNITS LEFT'
+string 'BOUGHT'
+string 'BUILDINGS'
+string 'CAPTURED'
+string 'MONEY'
+string 'SPENT'
+
+// Box titles in the match
+LOCA_orders      = string 'ORDERS'
+LOCA_command     = string 'COMMAND'
+LOCA_workshop    = string 'WORKSHOP'
+LOCA_airport     = string 'AIRPORT'
+LOCA_shipyard    = string 'SHIPYARD'

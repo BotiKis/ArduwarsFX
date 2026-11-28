@@ -11,4 +11,9 @@ include "unitsADone.txt" // player 1 units that are done for the turn: a dark gr
 include "unitsBDone.txt"
 include "arrowTiles.txt" // tools/arrowart.py: the movement arrow's 14 tiles, see arrowTiles.h
 include "sandbags.txt"   // 24x8, over the feet of a fortified unit
+include "titleLayers.txt"  // tools/titlelayers.py: the start screen's layers, see titleLayers.h
+include "pinup.txt"      // the menu screen's pinup, 56x64
+include "headings.txt"   // the menu screen's headings, 80x16: MENU, MAPS, CREDITS
+include "plates.txt"     // the menu screen's list plates, 80x16: a line, the chosen line
+include "menuBack.txt"   // the menu screen's background, 128x64 without mask
 include "loca.txt"       // all text on screen, hand-written

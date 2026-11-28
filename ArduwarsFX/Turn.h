@@ -11,13 +11,17 @@
 
 enum class AWTurn : uint8_t { Free, Selected };
 AWTurn turn = AWTurn::Free;
-bool sceneBlack;          // boxes and the wipe draw black behind them instead of the map
+// What boxes and the wipe draw behind them: the map, black, or the menu screen (Title.h).
+enum class AWScene : uint8_t { Map, Black, Menu };
+AWScene scene;
+static void drawMenu();
 
 // ---- Text and boxes ----
 
 int16_t printX, printY;
+bool textWhite;           // the title screens print white on black
 
-// One Tinyfont letter at printX, printY in black, then printX moves on. Two letters share 4 bytes,
+// One Tinyfont letter at printX, printY in black (white with textWhite), then printX moves on. Two letters share 4 bytes,
 // one byte per column: the even letter in the low 4 bits, the odd one in the high 4 bits.
 AW_FAST static void printChar(char c) {
   const uint8_t *letter = TINYFONT_SPRITE + ((c - 32) / 2) * 4;
@@ -26,8 +30,13 @@ AW_FAST static void printChar(char c) {
   for (uint8_t i = 0; i < 4; i++) {
     uint8_t bits = pgm_read_byte(letter + i);
     uint16_t pixels = uint8_t(c & 1 ? bits >> 4 : bits & 15) * down;
-    column[0] &= ~pixels;
-    if (shift > 4) column[WIDTH] &= ~(pixels >> 8);
+    if (textWhite) {
+      column[0] |= pixels;
+      if (shift > 4) column[WIDTH] |= pixels >> 8;
+    } else {
+      column[0] &= ~pixels;
+      if (shift > 4) column[WIDTH] &= ~(pixels >> 8);
+    }
     column++;
   }
   printX += 5;
@@ -90,50 +99,93 @@ static void printNumber(int16_t x, int16_t y, uint16_t n) {
   for (char *p = digits; p < end; p++) printChar(*p);
 }
 
-// A box with rounded corners in a shade (BLACK to WHITE), as in the old game.
-static void fillBox(int16_t x, int16_t y, uint8_t w, uint8_t h, uint8_t shade) {
-  uint8_t lit = shade >> arduboy.currentPlane() & 1;
-  for (uint8_t i = 0; i < 3; i++) {
-    uint8_t inset = 3 - i;
-    SpritesU::fillRect(x + i, y + inset, 1, h - 2 * inset, lit);
-    SpritesU::fillRect(x + w - 1 - i, y + inset, 1, h - 2 * inset, lit);
+// The game's scroll bar, for every list that scrolls: a light gray track 2 pixels wide and h rows high,
+// a dark gray thumb 6 rows high, at pos of 0 to range.
+static void drawScrollBar(uint8_t x, uint8_t y, uint8_t h, uint8_t pos, uint8_t range) {
+  uint8_t plane = arduboy.currentPlane();
+  SpritesU::fillRect(x, y, 2, h, plane);   // light gray: lit only in the bright layer
+  SpritesU::fillRect(x, y + uint16_t(pos) * (h - 6) / range, 2, 6, plane == 0);   // dark gray: only in the dim layer
+}
+
+// Up or down for a scrolling list: 1 on a press, then again every 4 pictures while held, after 15.
+static int8_t scrollStep() {
+  static uint8_t held;
+  int8_t step = arduboy.pressed(DOWN_BUTTON) ? 1 : arduboy.pressed(UP_BUTTON) ? -1 : 0;
+  if (!step) held = 0;
+  else if (++held != 1 && (held < 15 || held % 4)) step = 0;
+  return step;
+}
+
+// The look of every box in the match: a white panel with a black outline, 1 pixel round corners and
+// the top right corner cut. A title sits white in a black tab on top, the panel starts 5 rows lower.
+// Returns the panel's top row.
+constexpr uint8_t Notch = 5;
+static uint8_t drawBox(uint8_t x, uint8_t y, uint8_t w, uint8_t h, uint24_t title) {
+  if (title) {
+    uint8_t tab = textLength(title) * 5 + 6;
+    SpritesU::fillRect(x + 1, y, tab - 1, 7, 0);
+    SpritesU::fillRect(x, y + 1, 1, 6, 0);
+    for (uint8_t i = 0; i < 4; i++) SpritesU::fillRect(x + tab + i, y + i, 1, 7 - i, 0);   // slope
+    textWhite = true;
+    printAt(x + 3, y + 1, title);
+    textWhite = false;
+    y += 5;
+    h -= 5;
   }
-  SpritesU::fillRect(x + 3, y, w - 6, h, lit);
+  uint8_t right = x + w - Notch;
+  SpritesU::fillRect(x + 1, y, right - x - 1, h, 0);
+  SpritesU::fillRect(x, y + 1, 1, h - 2, 0);
+  SpritesU::fillRect(x + 1, y + 1, right - x - 1, h - 2, 1);
+  for (uint8_t i = 0; i < Notch; i++) {   // the cut corner and the right edge, a column each
+    SpritesU::fillRect(right + i, y + i, 1, h - i - (i == Notch - 1), 0);
+    if (i < Notch - 1) SpritesU::fillRect(right + i, y + i + 1, 1, h - i - 2, 1);
+  }
+  return y;
+}
+
+// The bar under the chosen line: light gray, 6 rows, 1 pixel round corners, the top right corner cut like
+// the box's (3 pixels).
+static void drawBar(uint8_t x, uint8_t y, uint8_t w) {
+  uint8_t lit = LIGHT_GRAY >> arduboy.currentPlane() & 1;
+  SpritesU::fillRect(x + 1, y, w - 5, 6, lit);
+  SpritesU::fillRect(x, y + 1, 1, 4, lit);
+  for (uint8_t i = 0; i < 4; i++) SpritesU::fillRect(x + w - 4 + i, y + i, 1, 6 - i - (i == 3), lit);
 }
 
 static void drawScene() {
-  if (sceneBlack) memset(arduboy.getBuffer(), 0, WIDTH * HEIGHT / 8);
-  else drawMap();
+  if (scene == AWScene::Map) drawMap();
+  else if (scene == AWScene::Black) memset(arduboy.getBuffer(), 0, WIDTH * HEIGHT / 8);
+  else drawMenu();
 }
 
-// A dialog (one line in the middle, B closes it) or a list of options at the top right with a cursor.
-// Returns the chosen option, -1 when A closed the list. `number` goes in front of the first option.
-static int8_t showBox(const uint24_t options[], uint8_t count, bool isDialog, uint8_t number = 0) {
-  uint8_t w = isDialog ? textLength(options[0]) * 5 + 8 : 54, h = isDialog ? 16 : 6 + count * 7;
-  uint8_t x = isDialog ? (WIDTH - w) / 2 : WIDTH - w - 4, y = isDialog ? 24 : 10;
-  uint8_t textX = x + (isDialog ? 4 : 9), textY = y + (isDialog ? 6 : 4);
+// A dialog (one line in the middle, B closes it) or a list of options at the top right with a title.
+// The chosen option sits on a light gray bar (drawBar), 1 pixel to the right. Returns the chosen option, -1 when A closed the list.
+// `number` goes in front of the first option.
+static int8_t showBox(uint24_t title, const uint24_t options[], uint8_t count, bool isDialog, uint8_t number = 0) {
+  uint8_t w = isDialog ? textLength(options[0]) * 5 + 14 : 56, h = isDialog ? 14 : (title ? 12 : 7) + count * 7;
+  uint8_t x = isDialog ? (WIDTH - w) / 2 : WIDTH - w - 3, y = isDialog ? 25 : 10;
   int8_t chosen = 0;
   while (true) {
     drawScene();
-    fillBox(x, y, w, h, BLACK);
-    fillBox(x + 1, y + 1, w - 2, h - 3, WHITE);
+    uint8_t textY = drawBox(x, y, w, h, title) + 5;
     for (uint8_t i = 0; i < count; i++) {
-      uint8_t tx = textX;
-      if (i == 0 && number) { printNumber(tx, textY, number); tx = printX; }
-      printAt(tx, textY + 7 * i, options[i]);
+      bool bar = !isDialog && i == chosen;
+      uint8_t tx = x + (isDialog ? 7 : 6) + bar, ty = textY + 7 * i;
+      if (bar) drawBar(x + 2, ty - 1, w - 4);
+      if (i == 0 && number) { printNumber(tx, ty, number); tx = printX; }
+      printAt(tx, ty, options[i]);
     }
-    if (!isDialog) { printX = x + 4; printY = textY + 7 * chosen; printChar('>'); }
     if (!sendLayer()) continue;
-    if (arduboy.justPressed(B_BUTTON)) return chosen;
+    if (arduboy.justPressed(B_BUTTON)) { playSound(SoundConfirm); return chosen; }
     if (isDialog) continue;
-    if (arduboy.justPressed(A_BUTTON)) return -1;
+    if (arduboy.justPressed(A_BUTTON)) { playSound(SoundBack); return -1; }
     if (arduboy.justPressed(DOWN_BUTTON)) chosen = chosen + 1 == count ? 0 : chosen + 1;
     if (arduboy.justPressed(UP_BUTTON)) chosen = chosen ? chosen - 1 : count - 1;
   }
 }
 
 // One line in the middle of the screen, B closes it.
-static void dialog(uint24_t text) { showBox(&text, 1, true); }
+static void dialog(uint24_t text) { showBox(0, &text, 1, true); }
 
 // The wipe from the old game: rows of 8 pixels slide sideways, even rows one way, odd rows the other,
 // 6 pixels per picture. Out: the scene slides away to black. In: it slides in from black.
@@ -154,7 +206,8 @@ static void wipe(bool in) {
 
 // ---- The turn ----
 
-uint8_t winner;           // 1 player 1, 2 player 2, 3 a draw: the match is over
+uint8_t winner;           // 1 player 1, 2 player 2, 3 a draw, Quit: the match is over
+constexpr uint8_t Quit = 4;
 
 static uint8_t readyUnits() {
   uint8_t n = 0;
@@ -166,7 +219,19 @@ static uint8_t readyUnits() {
 // money right-aligned. Its letters are found when the map changes (prepareTopBar, from updateMapView),
 // each layer only draws them: 5 pixels per letter from x = 1.
 constexpr uint8_t BarLetters = 25;
-char barText[BarLetters];
+// The title screens (Title.h) keep their list in the same bytes: they never show together. A list is
+// `count` texts that follow each other on the FX chip from `first` on (loca.txt).
+struct AWList {
+  uint24_t first;
+  uint8_t count, heading;   // heading: 0 MENU, 1 MAPS, 2 CREDITS
+  int8_t chosen, top;       // chosen line, first line on screen
+  int8_t pinupX;            // the menu screen's pinup slides in
+  int8_t slide;             // how far the chosen plate is out
+};
+static union {
+  char barText[BarLetters];
+  AWList list;
+};
 
 static char *copyText(char *p, uint24_t text) {
   FX::seekData(text);
@@ -233,7 +298,7 @@ static void upkeep() {
 }
 
 static void startTurn() {
-  sceneBlack = true;
+  scene = AWScene::Black;
   dialog(match.side ? LOCA_player2 : LOCA_player1);
   randomState += pictureCount;   // the damage roll depends on when B was pressed
   upkeep();
@@ -242,7 +307,7 @@ static void startTurn() {
   camY = match.viewY[match.side];
   prepareBlocks();
   updateMapView();
-  sceneBlack = false;
+  scene = AWScene::Map;
   wipe(true);
 }
 
@@ -254,7 +319,7 @@ static void endTurn() {
   match.viewX[match.side] = camX;
   match.viewY[match.side] = camY;
   wipe(false);
-  sceneBlack = true;
+  scene = AWScene::Black;
   match.side ^= 1;
   if (match.side == 0) match.day++;
   startTurn();
@@ -308,6 +373,7 @@ static void showPictures(uint8_t n) {
 
 // A hit: the screen turns inverted for 4 pictures, then back for 4.
 static void flash(uint8_t times) {
+  playSound(SoundHit);
   while (times--)
     for (uint8_t on = 2; on-- > 0;) {
       FX::enableOLED();   // invert talks to the screen
@@ -329,6 +395,8 @@ static void glideTo(uint8_t c, uint8_t r) {
 
 // Unit i of a side flickers for about a second, then it leaves the map.
 static void destroyUnit(uint8_t side, uint8_t i) {
+  playSound(SoundDestroyed);
+  match.destroyed[side ^ 1]++;
   for (uint8_t f = 0; f < 60;) {
     drawMap();
     if (!sendLayer()) continue;
@@ -398,8 +466,9 @@ static bool chooseTarget() {
     if (!sendLayer()) continue;
     AWUnit &e = match.units[selSide ^ 1][t];
     glideTo(e.c, e.r);
-    if (arduboy.justPressed(B_BUTTON)) { fight(t); return true; }
+    if (arduboy.justPressed(B_BUTTON)) { playSound(SoundConfirm); fight(t); return true; }
     if (arduboy.justPressed(A_BUTTON)) {
+      playSound(SoundBack);
       AWUnit &u = match.units[selSide][selUnit];
       centerOn(u.c, u.r);
       updateMapView();
@@ -423,6 +492,7 @@ static void capture(uint8_t b) {
     drawMap();
     if (!sendLayer()) continue;
     walkX = tileX(u.c, u.r) + 12;
+    if (f % 12 == 9) playSound(SoundThump);   // lands
     walkY = tileY(u.c, u.r) + 10 - pgm_read_byte(&hop[f++ % 12]);
     mapChanged = f == 1;
     updateMapView();
@@ -433,10 +503,12 @@ static void capture(uint8_t b) {
   if (u.health < bd.capture) { bd.capture -= u.health; return; }
   readBuilding(b);
   bd.owner = selSide + 1;
+  match.captured[selSide]++;
   bd.capture = fullCapture(bldKind);
   if (!bldKind) { winner = selSide + 1; return; }
   computeFog();
   updateMapView();
+  playSound(SoundCaptured);
   dialog(LOCA_captured);
 }
 
@@ -460,7 +532,7 @@ static void unitMenu(bool ambushed, uint8_t seenBefore) {
     if (canCapture) options[n++] = LOCA_capture;
     options[n++] = canFortify ? LOCA_fortify : LOCA_wait;
     if (canCancel) options[n++] = LOCA_cancel;
-    int8_t chosen = showBox(options, n, false);
+    int8_t chosen = showBox(LOCA_orders, options, n, false);
     if (chosen < 0) {
       if (!canCancel) continue;
       chosen = n - 1;
@@ -495,51 +567,55 @@ static void unitMenu(bool ambushed, uint8_t seenBefore) {
 }
 
 // The shop of an own workshop, airport or shipyard with nobody on it, as in Arduwarsx 1.1: the units it
-// sells with a cursor, the chosen unit's picture, price, attack and speed. B buys (the unit waits until
+// sells, the chosen one on a light gray bar, its picture, price, attack and speed. B buys (the unit waits until
 // the next turn), A closes. An X marks what the player can not buy.
 static void shop(uint8_t kind) {
   uint8_t first = kind == 2 ? 0 : kind == 3 ? 10 : 13, count = kind == 2 ? 10 : kind == 3 ? 3 : 2;
+  uint24_t title = kind == 2 ? LOCA_workshop : kind == 3 ? LOCA_airport : LOCA_shipyard;
   uint8_t side = match.side;
   int8_t chosen = 0;
   while (true) {
     drawScene();
-    fillBox(3, 9, WIDTH - 6, HEIGHT - 10, BLACK);
-    fillBox(4, 10, WIDTH - 8, HEIGHT - 13, WHITE);
-    int8_t top = min((4 - chosen) * 8, 0);   // the list scrolls so the cursor stays on screen
+    drawBox(2, 9, WIDTH - 4, HEIGHT - 11, title);   // the panel: rows 14 to 61, its lines from 19
+    int8_t top = min((5 - chosen) * 7, 0);   // 6 lines show, the list scrolls so the bar stays on screen
     // the names follow each other on the FX chip: one read for the whole list
     FX::seekData(kind == 2 ? LOCA_unitNames : kind == 3 ? LOCA_planeNames : LOCA_shipNames);
     for (uint8_t i = 0; i < count; i++) {
-      int8_t y = 14 + i * 8 + top;
-      bool shown = y >= 10 && y <= HEIGHT - 8;
+      int8_t y = 19 + i * 7 + top;
+      bool shown = y >= 19 && y <= 54;
       uint8_t k = first + i;
       bool canBuy = pgm_read_byte(&unitPrice[k]) <= match.money[side] && match.unitCount[side] < MaxUnits;
-      printX = 12 + (chosen == i && canBuy ? 4 : 0);
+      bool bar = shown && i == chosen;
+      if (bar) drawBar(4, y - 1, 71);
+      printX = 8 + bar;
       printY = y;
       char c;
       while ((c = FX::readPendingUInt8()) != 0)
         if (shown) printChar(c);
-      if (shown && !canBuy) { printX = 66; printChar('X'); }   // the player can not buy it
+      if (shown && !canBuy) { printX = 60 + bar; printChar('X'); }   // the player can not buy it
     }
     FX::readEnd();
-    printX = 6;
-    printY = 14 + chosen * 8 + top;
-    printChar('>');
+    if (count > 6) drawScrollBar(75, 18, 42, chosen > 5 ? chosen - 5 : 0, count - 6);   // right of the list
     uint8_t k = first + chosen;
-    drawFX(88, 12, 24, 24, side ? unitsB : unitsA, k, arduboy.currentPlane());
-    printAt(76, 38, LOCA_money);
-    printNumber(90, 38, pgm_read_byte(&unitPrice[k]) * 100);
-    printAt(76, 45, LOCA_attackShort);
-    printNumber(115, 45, unitStat(k, 0));
-    printAt(76, 52, LOCA_speed);
-    printNumber(115, 52, pgm_read_byte(&unitMove[k]));
+    drawFX(90, 16, 24, 24, side ? unitsB : unitsA, k, arduboy.currentPlane());
+    printAt(78, 41, LOCA_money);
+    printNumber(92, 41, pgm_read_byte(&unitPrice[k]) * 100);
+    printAt(78, 48, LOCA_attackShort);
+    printNumber(116, 48, unitStat(k, 0));
+    printAt(78, 55, LOCA_speed);
+    printNumber(116, 55, pgm_read_byte(&unitMove[k]));
     if (!sendLayer()) continue;
-    if (arduboy.justPressed(A_BUTTON)) return;
-    if (arduboy.justPressed(DOWN_BUTTON) && chosen < count - 1) chosen++;
-    if (arduboy.justPressed(UP_BUTTON) && chosen > 0) chosen--;
+    if (arduboy.justPressed(A_BUTTON)) { playSound(SoundBack); return; }
+    int8_t step = scrollStep();
+    if (step > 0 && chosen < count - 1) chosen++;
+    if (step < 0 && chosen > 0) chosen--;
     if (!arduboy.justPressed(B_BUTTON)) continue;
     uint8_t price = pgm_read_byte(&unitPrice[k]);
     if (price > match.money[side] || match.unitCount[side] == MaxUnits) continue;
+    playSound(SoundConfirm);
     match.money[side] -= price;
+    match.spent[side] += price;
+    match.bought[side]++;
     AWUnit &u = match.units[side][match.unitCount[side]++];
     u = AWUnit();
     u.c = cursorC;
@@ -598,10 +674,11 @@ static void nextTestView() {
 }
 #endif
 
-// A new match on map 0, as in Arduwars 1.1: no units, 1000 money, the start buildings from the map.
-static void startMatch() {
+// A new match on a map, as in Arduwars 1.1: no units, 1000 money, the start buildings from the map.
+static void startMatch(uint8_t map) {
   memset(&match, 0, sizeof(match));
-  loadMap(0);
+  loadMap(map);
+  playGameTheme();
   match.day = 1;
   match.money[0] = match.money[1] = 10;
 #ifdef AW_MEASURE
@@ -612,22 +689,18 @@ static void startMatch() {
   startTurn();
 }
 
-// The end of the match: who won, then a new match. The results screen comes in step 3.
-static void endMatch() {
-  rangeOn = arrowOn = false;
-  cursorShown = true;
-  dialog(winner == 1 ? LOCA_p1Wins : winner == 2 ? LOCA_p2Wins : LOCA_draw);
-  wipe(false);
-  startMatch();
-}
-
+// End Turn box: "N LEFT" (only while units can still act), END TURN, QUIT (asks again), CANCEL.
 static void endTurnMenu() {
-  const uint24_t options[3] = { LOCA_unitsLeft, LOCA_endTurn, LOCA_cancel };
+  const uint24_t options[4] = { LOCA_unitsLeft, LOCA_endTurn, LOCA_quit, LOCA_cancel };
   uint8_t ready = readyUnits(), first = ready ? 0 : 1;
-  int8_t chosen = showBox(options + first, 3 - first, false, ready);
+  int8_t chosen = showBox(LOCA_command, options + first, 4 - first, false, ready);
   if (chosen < 0) return;
   chosen += first;
   if (chosen == 1) endTurn();
+  if (chosen == 2) {
+    const uint24_t sure[2] = { LOCA_cancel, LOCA_quitNow };
+    if (showBox(LOCA_quit, sure, 2, false) == 1) winner = Quit;
+  }
   if (chosen == 0)
     for (uint8_t i = 0; i < match.unitCount[match.side]; i++)
       if (!match.units[match.side][i].moved) { centerOn(match.units[match.side][i].c, match.units[match.side][i].r); updateMapView(); break; }
@@ -635,7 +708,6 @@ static void endTurnMenu() {
 
 // Once per picture on the map.
 static void updateTurn() {
-  if (winner) { endMatch(); return; }
   uint8_t lastC = cursorC, lastR = cursorR;
   panCamera();
   updateMapView();
@@ -647,10 +719,11 @@ static void updateTurn() {
 #ifdef AW_MEASURE
   if (arduboy.justPressed(A_BUTTON)) { nextTestView(); return; }
 #endif
-  if (arduboy.justPressed(A_BUTTON) && turn == AWTurn::Selected) dropSelection();
+  if (arduboy.justPressed(A_BUTTON) && turn == AWTurn::Selected) { playSound(SoundBack); dropSelection(); }
   if (!arduboy.justPressed(B_BUTTON)) return;
   if (turn == AWTurn::Selected) {
     if (!cursorOn || !canStop(cursorC, cursorR)) return;
+    playSound(SoundConfirm);
     uint8_t seen = seenEnemies();
     bool ambushed = arrowOn && cutAtAmbush();
     if (arrowOn && pathLength) walkPath();
@@ -663,6 +736,7 @@ static void updateTurn() {
   if (cursorOn) {
     uint8_t i = unitAt(match.side, cursorC, cursorR);
     if (i != 255 && !match.units[match.side][i].moved) {
+      playSound(SoundConfirm);
       selSide = match.side;
       selUnit = i;
       startFortified = match.units[selSide][i].fortified;

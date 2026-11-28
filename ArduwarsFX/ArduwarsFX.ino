@@ -13,6 +13,9 @@
 #ifndef ABG_REFRESH_HZ   // DEFS="-DABG_REFRESH_HZ=156" ./run.sh build tries another rate
 #define ABG_REFRESH_HZ 100
 #endif
+// The dim layer at screen setting 64 of 255 (ArduboyG's default is half, 127): half the setting still
+// shone at about 70%, so dark and light gray looked alike. 32 made light gray almost white (FX Mini, 2026-11-27).
+#define ABG_L4_DIM_CONTRAST 64
 constexpr uint8_t Planes = 2;   // layers per picture
 constexpr uint8_t PicturesPerSecond = ABG_REFRESH_HZ / Planes;
 #include "ArduboyG.h"
@@ -29,6 +32,7 @@ constexpr uint8_t PicturesPerSecond = ABG_REFRESH_HZ / Planes;
 ArduboyGBase_Config<ABG_Mode::L4_Contrast> arduboy;
 ARDUBOY_NO_USB   // to upload, hold DOWN while switching on
 
+#include "AWSounds.h"
 #include "Match.h"
 #include "MapView.h"
 #include "Rules.h"
@@ -74,6 +78,7 @@ static bool sendLayer() {
 #ifdef AW_MEASURE
   layerStart = micros();
 #endif
+  soundStep();
   if (!arduboy.needsUpdate()) return false;
   arduboy.pollButtons();
   pictureCount++;
@@ -90,18 +95,26 @@ static bool sendLayer() {
 }
 
 #include "Turn.h"
+#include "Title.h"
 
 void setup() {
   arduboy.boot();
   arduboy.flashlight();
   FX::begin(FX_DATA_PAGE);
+  arduboy.audio.begin();   // the sound switch, kept in EEPROM
+  soundBegin();            // music and beeps, moved on by sendLayer (AWSounds.cpp)
   FX::enableOLED();
   arduboy.startGray();
   FX::disableOLED();
-  startMatch();
 }
 
+// Title, match, results, title again.
 void loop() {
-  drawMap();
-  if (sendLayer()) updateTurn();
+  startMatch(titleScreens());
+  while (!winner) {
+    drawMap();
+    if (sendLayer()) updateTurn();
+  }
+  if (winner == Quit) wipe(false);
+  else results();
 }

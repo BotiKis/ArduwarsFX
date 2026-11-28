@@ -37,6 +37,9 @@ struct AWMatch {
   uint16_t money[2];      // in hundreds: 10 shows as 1000
   int16_t viewX[2], viewY[2];   // each side's camera when its turn ended
   uint8_t unitCount[2];
+  // For the results: enemy units each side destroyed, units bought, buildings taken, money spent in hundreds
+  uint8_t destroyed[2], bought[2], captured[2];
+  uint16_t spent[2];
   AWUnit units[2][MaxUnits];
   AWBuilding buildings[MaxBuildings];
 };

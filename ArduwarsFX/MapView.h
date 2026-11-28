@@ -309,11 +309,11 @@ static void prepareBlocks() {
   }
 }
 
-// While the shop is open, its box hides the middle of the screen: columns 6 to 121, rows 9 to 62 are
-// covered for sure (fillBox in shop). A picture 24 rows tall that lies inside is not drawn.
+// While the shop is open, its box hides the middle of the screen: columns 3 to 120, rows 15 to 60 are
+// covered for sure (drawBox in shop). A picture 24 rows tall that lies inside is not drawn.
 bool shopOpen;
 static bool underShop(int16_t x, int16_t y, uint8_t w) {
-  return shopOpen && x >= 6 && x <= WIDTH - 6 - w && y >= 9 && y <= HEIGHT - 1 - 24;
+  return shopOpen && x >= 3 && x <= WIDTH - 7 - w && y >= 15 && y <= HEIGHT - 3 - 24;
 }
 
 // The unit sheets unitsA, unitsB, unitsADone, unitsBDone must follow each other in fxdata.txt.
